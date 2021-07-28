@@ -18,9 +18,13 @@
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std::{ops::Deref, sync::Arc, time::Duration};
+use std::sync::Arc;
+use std::time::Duration;
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+
+use crate::{ShardId, TenantId};
 
 
 //TODO make sure we can evolve out of the serialization format
@@ -29,12 +33,16 @@ use serde::{Deserialize, Serialize};
 pub struct StaticRoutingConfig(Arc<StaticRoutingConfigInner>);
 
 impl StaticRoutingConfig {
-    pub fn routing_key(&self) -> &str {
-        &self.0.routing_key
+    pub fn tenant_key(&self) -> &str {
+        &self.0.tenant_key
     }
 
-    pub fn shards(&self) -> &[ShardConfig] {
-        &self.0.shards[..]
+    pub fn shards(&self) -> &HashMap<ShardId, ShardConfig> {
+        &self.0.shards
+    }
+
+    pub fn tenants(&self) -> &HashMap<TenantId, TenantConfig> {
+        &self.0.tenants
     }
 }
 
@@ -64,15 +72,21 @@ impl<'de> Deserialize<'de> for StaticRoutingConfig {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct StaticRoutingConfigInner {
-    pub routing_key: String,
-    pub shards: Vec<ShardConfig>
+    pub tenant_key: String,
+    pub shards: HashMap<ShardId, ShardConfig>,
+    pub tenants: HashMap<TenantId, TenantConfig>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TenantConfig {
+    pub tenant_id: String,
+    pub target_shard: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ShardConfig {
-    pub name: String,
+    pub shard_id: String,
     pub mem_budget_in_bytes: u64,
-    pub routing_keys: Vec<String>,
     pub commit_policy: CommitPolicy
 }
 

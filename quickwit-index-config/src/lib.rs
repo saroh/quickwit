@@ -42,3 +42,6 @@ pub use config::{IndexConfig, SortBy, SortOrder};
 pub use default_index_config::{DefaultIndexConfig, DefaultIndexConfigBuilder, DocParsingError};
 pub use wikipedia_config::WikipediaIndexConfig;
 pub use sharding_config::StaticRoutingConfig;
+
+pub type ShardId = String;
+pub type TenantId = String;

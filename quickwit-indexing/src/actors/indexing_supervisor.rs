@@ -3,6 +3,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use quickwit_actors::AsyncActor;
 use quickwit_actors::KillSwitch;
+use quickwit_actors::Mailbox;
 use quickwit_actors::SyncActor;
 use quickwit_index_config::IndexConfig;
 use quickwit_metastore::Metastore;
@@ -14,7 +15,7 @@ use crate::actors::IndexerParams;
 use crate::actors::Packager;
 use crate::actors::Publisher;
 use crate::actors::Uploader;
-use crate::actors::router::MailboxWithOffsets;
+use crate::models::Batch;
 use crate::models::SplitLabel;
 
 // Quickwit
@@ -96,7 +97,7 @@ impl IndexingSupervisor {
             mem_budget_in_bytes: MEM_BUDGET_IN_BYTES,
         };
 
-        let mut mailboxes: Vec<MailboxWithOffsets> = Vec::new();
+        let mut mailboxes: Vec<Mailbox<Batch>> = Vec::new();
         for (shard_id, shard_config) in index_metadata.sharding_config.shards().iter().enumerate() {
             let split_label = SplitLabel {
                 source: "<fixme>".to_string(), // TODO Fixme
@@ -114,11 +115,7 @@ impl IndexingSupervisor {
                 packager_mailbox.clone(),
             )?;
             let (mailbox, _writer_handle) = writer.spawn(100, kill_switch.clone());
-            let mailbox_with_offsets = MailboxWithOffsets {
-                mailbox,
-                checkpoint: index_metadata.per_shards_checkpoint[shard_id].clone(),
-            };
-            mailboxes.push(mailbox_with_offsets);
+            mailboxes.push(mailbox);
         }
 
         // let source = build_source(

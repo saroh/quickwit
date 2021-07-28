@@ -37,3 +37,5 @@ pub use self::uploaded_split::UploadedSplit;
 pub type SourceId = String;
 pub type IndexId = String;
 pub type Offset = Vec<u8>;
+pub type ShardId = String;
+pub type TenantId = String;

@@ -27,7 +27,7 @@ use std::fmt::Debug;
 use std::ops::Range;
 
 use async_trait::async_trait;
-use quickwit_index_config::{IndexConfig, StaticRoutingConfig};
+use quickwit_index_config::{IndexConfig, StaticRoutingConfig, TenantId};
 use serde::{de, Deserialize, Serialize};
 
 use crate::{Checkpoint, MetastoreResult};
@@ -72,7 +72,7 @@ pub struct IndexMetadata {
     pub index_config: Box<dyn IndexConfig>,
     /// Per shard checkpoints. For each shard, all documents belonging to that shard
     /// happening before the checkpoint is indexed and published.
-    pub per_shards_checkpoint: Vec<Checkpoint>,
+    pub per_tenant_checkpoint: HashMap<TenantId, Checkpoint>,
     pub sharding_config: StaticRoutingConfig,
 }
 

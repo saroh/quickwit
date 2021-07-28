@@ -54,7 +54,7 @@ impl TestSandbox {
             index_id: index_id.to_string(),
             index_uri: format!("{}/{}", metastore_uri, index_id),
             index_config,
-            per_shards_checkpoint: Vec::new(),
+            per_tenant_checkpoint: HashMap::new(),
             sharding_config: StaticRoutingConfig::default(),
         };
         let storage_uri_resolver = StorageUriResolver::default();
