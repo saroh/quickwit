@@ -1,3 +1,5 @@
+use crate::models::Offset;
+
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
 //
@@ -18,11 +20,7 @@
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-mod scheduler;
-mod scheduler_config;
-mod source_indexing_config;
-mod unique_queue;
-
-pub use self::scheduler::start_scheduler;
-pub use self::scheduler_config::SchedulerConfig;
-pub use self::source_indexing_config::SourceIndexingConfig;
+pub struct Document {
+    pub sequence_number: Offset,
+    pub fields: serde_json::Value
+}

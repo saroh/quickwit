@@ -22,8 +22,12 @@ mod indexer;
 mod packager;
 mod publisher;
 mod uploader;
+mod router;
+mod indexing_supervisor;
 
 pub(crate) use indexer::{Indexer, IndexerParams};
 pub(crate) use packager::Packager;
 pub(crate) use publisher::Publisher;
 pub(crate) use uploader::Uploader;
+pub(crate) use router::{Router, RouteConfig};
+pub(crate) use indexing_supervisor::IndexingSupervisor;

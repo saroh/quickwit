@@ -1,4 +1,5 @@
 use quickwit_metastore::Checkpoint;
+use tantivy::Document;
 
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
@@ -22,6 +23,6 @@ use quickwit_metastore::Checkpoint;
 
 #[derive(Debug)]
 pub struct Batch {
-    pub docs: Vec<String>,
+    pub docs: Vec<Document>,
     pub checkpoint_update: Checkpoint,
 }

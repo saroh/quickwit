@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 /*
  * Copyright (C) 2021 Quickwit Inc.
  *
@@ -20,7 +21,7 @@
  */
 use std::sync::Arc;
 
-use quickwit_index_config::IndexConfig;
+use quickwit_index_config::{IndexConfig, StaticRoutingConfig};
 use quickwit_metastore::Checkpoint;
 use quickwit_metastore::{IndexMetadata, Metastore, MetastoreUriResolver};
 use quickwit_storage::StorageUriResolver;
@@ -53,7 +54,8 @@ impl TestSandbox {
             index_id: index_id.to_string(),
             index_uri: format!("{}/{}", metastore_uri, index_id),
             index_config,
-            checkpoint: Checkpoint::default(),
+            per_shards_checkpoint: Vec::new(),
+            sharding_config: StaticRoutingConfig::default(),
         };
         let storage_uri_resolver = StorageUriResolver::default();
         let metastore = MetastoreUriResolver::with_storage_resolver(storage_uri_resolver.clone())

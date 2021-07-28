@@ -130,12 +130,7 @@ impl SyncActor for Indexer {
         _progress: &quickwit_actors::Progress,
     ) -> Result<(), MessageProcessError> {
         let index_writer = self.index_writer()?;
-        for doc_json in document_batch.docs {
-            let doc = self
-                .params
-                .index_config
-                .doc_from_json(&doc_json)
-                .with_context(|| doc_json)?;
+        for doc in document_batch.docs {
             index_writer.add_document(doc);
         }
         self.checkpoint

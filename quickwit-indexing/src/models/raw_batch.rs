@@ -1,4 +1,4 @@
-use crate::scheduling::SourceIndexingConfig;
+use quickwit_metastore::Checkpoint;
 
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
@@ -20,7 +20,15 @@ use crate::scheduling::SourceIndexingConfig;
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#[derive(Clone, Debug)]
-pub struct SchedulerConfig {
-    pub source_configs: Vec<SourceIndexingConfig>,
+#[derive(Debug)]
+pub struct RawBatch {
+    pub docs_json: Vec<String>,
+    /// Checkpoint marking the last document of the batch.
+    ///
+    /// Subtle point here:
+    ///
+    /// For each shard, we will end up using this checkpoint to update the shard's position.
+    /// Change of sharding configuration will need to happen on a synchronous manner, meaning
+    /// that all shards must be commit right after a given batch before we can change the configuration.
+    pub checkpoint_update: Checkpoint,
 }

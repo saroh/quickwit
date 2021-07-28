@@ -22,12 +22,12 @@
 
 pub mod single_file_metastore;
 
-use std::collections::HashMap;
+use std::{collections::HashMap, sync::Arc};
 use std::fmt::Debug;
 use std::ops::Range;
 
 use async_trait::async_trait;
-use quickwit_index_config::IndexConfig;
+use quickwit_index_config::{IndexConfig, StaticRoutingConfig};
 use serde::{de, Deserialize, Serialize};
 
 use crate::{Checkpoint, MetastoreResult};
@@ -70,8 +70,10 @@ pub struct IndexMetadata {
     pub index_uri: String,
     /// The config used for this index.
     pub index_config: Box<dyn IndexConfig>,
-    /// Last indexed checkpoint.
-    pub checkpoint: Checkpoint,
+    /// Per shard checkpoints. For each shard, all documents belonging to that shard
+    /// happening before the checkpoint is indexed and published.
+    pub per_shards_checkpoint: Vec<Checkpoint>,
+    pub sharding_config: StaticRoutingConfig,
 }
 
 /// A split metadata carries all meta data about a split.

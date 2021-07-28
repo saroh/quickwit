@@ -33,6 +33,7 @@ mod default_index_config;
 mod error;
 mod query_builder;
 mod wikipedia_config;
+mod sharding_config;
 
 pub use error::QueryParserError;
 
@@ -40,3 +41,4 @@ pub use all_flatten_config::AllFlattenIndexConfig;
 pub use config::{IndexConfig, SortBy, SortOrder};
 pub use default_index_config::{DefaultIndexConfig, DefaultIndexConfigBuilder, DocParsingError};
 pub use wikipedia_config::WikipediaIndexConfig;
+pub use sharding_config::StaticRoutingConfig;

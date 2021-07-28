@@ -25,6 +25,7 @@ use std::collections::HashMap;
 pub struct Checkpoint {
     per_partition_position: HashMap<String, Vec<u8>>,
 }
+
 impl Checkpoint {
     /// Update the position shipped in the `checkpoint_update`.
     pub fn update_checkpoint(&mut self, checkpoint_update: Checkpoint) {

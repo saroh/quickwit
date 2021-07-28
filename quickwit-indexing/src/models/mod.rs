@@ -24,8 +24,10 @@ mod manifest;
 mod packaged_split;
 mod split_label;
 mod uploaded_split;
+mod raw_batch;
 
 pub use self::batch::Batch;
+pub use self::raw_batch::RawBatch;
 pub use self::indexed_split::IndexedSplit;
 pub use self::manifest::Manifest;
 pub use self::packaged_split::PackagedSplit;
@@ -34,3 +36,4 @@ pub use self::uploaded_split::UploadedSplit;
 
 pub type SourceId = String;
 pub type IndexId = String;
+pub type Offset = Vec<u8>;

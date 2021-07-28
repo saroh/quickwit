@@ -33,7 +33,6 @@ use crate::actors::Packager;
 use crate::actors::Publisher;
 use crate::actors::Uploader;
 use crate::models::SplitLabel;
-use crate::scheduling::SourceIndexingConfig;
 
 const MEM_BUDGET_IN_BYTES: usize = 2_000_000_000;
 
