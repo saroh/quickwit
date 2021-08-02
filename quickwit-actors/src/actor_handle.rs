@@ -1,91 +1,12 @@
-use flume::Receiver;
 use std::fmt;
-use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
-use uuid::Uuid;
+use tracing::error;
 
-use crate::{KillSwitch, Observation, Progress, SendError};
-
-pub struct Mailbox<Message> {
-    sender: flume::Sender<ActorMessage<Message>>,
-    id: Uuid,
-    actor_name: String,
-}
-
-impl<Message> Clone for Mailbox<Message> {
-    fn clone(&self) -> Self {
-        Mailbox {
-            sender: self.sender.clone(),
-            id: self.id.clone(),
-            actor_name: self.actor_name.clone(),
-        }
-    }
-}
-
-impl<Message> Mailbox<Message> {
-    pub(crate) fn new(sender: flume::Sender<ActorMessage<Message>>, actor_name: String) -> Self {
-        Mailbox {
-            sender,
-            id: Uuid::new_v4(),
-            actor_name,
-        }
-    }
-
-    pub fn actor_name(&self) -> String {
-        format!("{}:{}", self.actor_name, self.id)
-    }
-}
-
-impl<Message> fmt::Debug for Mailbox<Message> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Mailbox({})", self.actor_name())
-    }
-}
-
-impl<Message> Hash for Mailbox<Message> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.id.hash(state)
-    }
-}
-
-impl<Message> PartialEq for Mailbox<Message> {
-    fn eq(&self, other: &Self) -> bool {
-        self.id.eq(&other.id)
-    }
-}
-
-impl<Message> Eq for Mailbox<Message> {}
-
-impl<Message> Mailbox<Message> {
-    pub(crate) async fn send_actor_message(
-        &self,
-        msg: ActorMessage<Message>,
-    ) -> Result<(), SendError> {
-        self.sender.send_async(msg).await.map_err(|_| SendError)
-    }
-
-    /// Send a message to the actor synchronously.
-    ///
-    /// SendError is returned if the user is already terminated.
-    ///
-    /// (See also [Self::send_blocking()])
-    pub async fn send_async(&self, msg: Message) -> Result<(), SendError> {
-        self.send_actor_message(ActorMessage::Message(msg)).await
-    }
-
-    /// Send a message to the actor in a blocking fashion.
-    /// When possible, prefer using [Self::send_async()].
-    ///
-    // TODO do we need a version with a deadline?
-    pub fn send_blocking(&self, msg: Message) -> Result<(), SendError> {
-        self.sender
-            .send(ActorMessage::Message(msg))
-            .map_err(|_e| SendError)
-    }
-}
+use crate::mailbox::Command;
+use crate::{KillSwitch, Mailbox, Message, Observation, Progress};
 
 /// An Actor Handle serves as an address to communicate with an actor.
 ///
@@ -96,17 +17,17 @@ impl<Message> Mailbox<Message> {
 /// Because `ActorHandle`'s generic types are Message and Observable, as opposed
 /// to the actor type, `ActorHandle` are interchangeable.
 /// It makes it possible to plug different implementations, have actor proxy etc.
-pub struct ActorHandle<Message, ObservableState> {
-    inner: Arc<InnerActorHandle<Message, ObservableState>>,
+pub struct ActorHandle<M: Message, ObservableState> {
+    inner: Arc<InnerActorHandle<M, ObservableState>>,
 }
 
-impl<Message: fmt::Debug, ObservableState> fmt::Debug for ActorHandle<Message, ObservableState> {
+impl<M: Message, ObservableState> fmt::Debug for ActorHandle<M, ObservableState> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ActorHandle({})", self.inner.mailbox.actor_name())
     }
 }
 
-impl<Message, ObservableState> Clone for ActorHandle<Message, ObservableState> {
+impl<M: Message, ObservableState> Clone for ActorHandle<M, ObservableState> {
     fn clone(&self) -> Self {
         ActorHandle {
             inner: self.inner.clone(),
@@ -114,11 +35,9 @@ impl<Message, ObservableState> Clone for ActorHandle<Message, ObservableState> {
     }
 }
 
-impl<Message: Send + Sync + fmt::Debug, ObservableState: Clone + Send + fmt::Debug>
-    ActorHandle<Message, ObservableState>
-{
+impl<M: Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<M, ObservableState> {
     pub(crate) fn new(
-        mailbox: Mailbox<Message>,
+        mailbox: Mailbox<M>,
         last_state: watch::Receiver<ObservableState>,
         join_handle: JoinHandle<ActorTermination>,
         progress: Progress,
@@ -147,27 +66,31 @@ impl<Message: Send + Sync + fmt::Debug, ObservableState: Clone + Send + fmt::Deb
         }
     }
 
-    /// Returns a snapshot of the observable state of the actor.
+    pub fn mailbox(&self) -> &Mailbox<M> {
+        &self.inner.as_ref().mailbox
+    }
+
+    /// Process all of the pending message, and returns a snapshot of
+    /// the observable state of the actor after this.
     ///
-    /// Observe goes through the mechanism of message passing too.
-    /// As a result, it actually waits for all of the pending message
-    /// in the inbox to be processed before snapshotting.
-    ///
-    /// Therefore, it can be used in unit test to "sync" the actor,
-    /// and some race conditions.
+    /// This method is mostly useful in tests.
     ///
     /// Because the observation requires to wait for the mailbox to be empty,
     /// observation, it may timeout.
     ///
     /// In that case, [Observation::Timeout] is returned with the last
     /// observed state.
-    pub async fn observe(&self) -> Observation<ObservableState> {
+    pub async fn process_and_observe(&self) -> Observation<ObservableState> {
         let (tx, rx) = oneshot::channel();
-        let _ = self
+        if self
             .inner
             .mailbox
             .send_actor_message(ActorMessage::Observe(tx))
-            .await;
+            .await
+            .is_err()
+        {
+            error!("Failed to send message");
+        }
         let observable_state_or_timeout = timeout(crate::HEARTBEAT, rx).await;
         let state = self.inner.last_state.borrow().clone();
         match observable_state_or_timeout {
@@ -183,10 +106,52 @@ impl<Message: Send + Sync + fmt::Debug, ObservableState: Clone + Send + fmt::Deb
             }
         }
     }
+
+    /// Terminates the actor, regardless of whether there are pending messages or not.
+    pub async fn finish(&self) {
+        let (tx, rx) = oneshot::channel();
+        let _ = self.mailbox().send_command(Command::Stop(tx)).await;
+        let _ = rx.await;
+    }
+
+    /// Observe the current state.
+    ///
+    /// If a message is currently being processed, the observation will be
+    /// after its processing has finished.
+    pub async fn observe(&self) -> Observation<ObservableState> {
+        let (tx, rx) = oneshot::channel();
+        if self
+            .inner
+            .mailbox
+            .send_command(Command::Observe(tx))
+            .await
+            .is_err()
+        {
+            error!("Failed to send message");
+        }
+        let observable_state_or_timeout = timeout(crate::HEARTBEAT, rx).await;
+        let state = self.inner.last_state.borrow().clone();
+        match observable_state_or_timeout {
+            Ok(Ok(())) => Observation::Running(state),
+            Ok(Err(_)) => Observation::Terminated(state),
+            Err(_) => {
+                if self.inner.kill_switch.is_alive() {
+                    Observation::Timeout(state)
+                } else {
+                    self.inner.join_handle.abort();
+                    Observation::Terminated(state)
+                }
+            }
+        }
+    }
+
+    pub fn last_observation(&self) -> ObservableState {
+        self.inner.last_state.borrow().clone()
+    }
 }
 
-struct InnerActorHandle<Message, ObservableState> {
-    mailbox: Mailbox<Message>,
+struct InnerActorHandle<M: Message, ObservableState> {
+    mailbox: Mailbox<M>,
     join_handle: JoinHandle<ActorTermination>,
     kill_switch: KillSwitch,
     last_state: watch::Receiver<ObservableState>,
@@ -206,12 +171,12 @@ pub enum ActorTermination {
     DownstreamClosed,
 }
 
-pub(crate) enum ActorMessage<Message> {
-    Message(Message),
+pub(crate) enum ActorMessage<M: Message> {
+    Message(M),
     Observe(oneshot::Sender<()>),
 }
 
-impl<Message: fmt::Debug> fmt::Debug for ActorMessage<Message> {
+impl<M: Message> fmt::Debug for ActorMessage<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Message(msg) => {
@@ -222,25 +187,4 @@ impl<Message: fmt::Debug> fmt::Debug for ActorMessage<Message> {
             }
         }
     }
-}
-
-pub struct DebugInbox<M>(Receiver<ActorMessage<M>>);
-
-impl<M> DebugInbox<M> {
-    pub fn drain(&self) -> Vec<M> {
-        self.0
-            .drain()
-            .flat_map(|msg| match msg {
-                ActorMessage::Message(msg) => Some(msg),
-                ActorMessage::Observe(_) => None,
-            })
-            .collect()
-    }
-}
-
-pub fn mock_mailbox<M>() -> (Mailbox<M>, DebugInbox<M>) {
-    let (tx, rx) = flume::unbounded();
-    let mailbox = Mailbox::new(tx, "mock_actor".to_string());
-    let debug_inbox = DebugInbox(rx);
-    (mailbox, debug_inbox)
 }

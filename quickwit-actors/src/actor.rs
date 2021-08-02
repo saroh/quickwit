@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 
-use crate::SendError;
+use crate::{Message, SendError};
 
 #[derive(Error, Debug)]
 pub enum MessageProcessError {
@@ -33,7 +33,7 @@ impl From<SendError> for MessageProcessError {
 /// - sync actors, executed on the blocking thread pool of tokio runtime.
 pub trait Actor: Send + Sync + 'static {
     /// Type of message that can be received by the actor.
-    type Message: Send + Clone + Sync + fmt::Debug;
+    type Message: Message;
     /// Piece of state that can be copied for assert in unit test, admin, etc.
     type ObservableState: Send + Clone + Sync + fmt::Debug;
     /// A name identifying the type of actor.
@@ -43,7 +43,9 @@ pub trait Actor: Send + Sync + 'static {
         type_name::<Self>().to_string()
     }
 
-    fn default_message(&self) -> Option<Self::Message>;
+    fn default_message(&self) -> Option<Self::Message> {
+        None
+    }
 
     /// Extracts an observable state. Useful for unit test, and admin UI.
     ///

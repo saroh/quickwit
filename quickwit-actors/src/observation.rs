@@ -12,6 +12,16 @@ pub enum Observation<ObservableState: fmt::Debug> {
     Timeout(ObservableState),
 }
 
+impl<ObservableState: fmt::Debug> Observation<ObservableState> {
+    pub fn state(&self) -> &ObservableState {
+        match self {
+            Observation::Running(state) => state,
+            Observation::Terminated(state) => state,
+            Observation::Timeout(state) => state,
+        }
+    }
+}
+
 impl<State: fmt::Debug + PartialEq> PartialEq for Observation<State> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {

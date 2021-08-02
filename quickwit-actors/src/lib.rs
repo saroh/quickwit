@@ -30,15 +30,16 @@ use tokio::time::Duration;
 mod actor;
 mod actor_handle;
 mod async_actor;
-pub mod clock;
+mod mailbox;
 mod observation;
 mod sync_actor;
 #[cfg(test)]
 mod tests;
 
+pub use self::async_actor::Context;
+pub use self::mailbox::{Mailbox, Message, ReceptionResult};
 pub use actor::{Actor, KillSwitch, MessageProcessError, Progress};
-pub(crate) use actor_handle::ActorMessage;
-pub use actor_handle::{mock_mailbox, ActorHandle, DebugInbox, Mailbox};
+pub use actor_handle::ActorHandle;
 pub use async_actor::AsyncActor;
 pub use observation::Observation;
 pub use sync_actor::SyncActor;
@@ -52,6 +53,10 @@ pub const HEARTBEAT: Duration = if cfg!(test) {
 } else {
     Duration::from_secs(1)
 };
+
+pub fn message_timeout() -> Duration {
+    HEARTBEAT.mul_f32(0.2f32)
+}
 
 /// Error returned when a message is sent to an actor that is detected as terminated.
 #[derive(Debug)]

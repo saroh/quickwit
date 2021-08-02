@@ -1,6 +1,6 @@
-use crate::actor::{Actor, KillSwitch, Progress};
-use crate::actor_handle::Mailbox;
-use crate::{AsyncActor, MessageProcessError, Observation, SyncActor};
+use crate::actor::{Actor, KillSwitch};
+use crate::mailbox::{Capacity, Command};
+use crate::{AsyncActor, Context, Mailbox, Message, MessageProcessError, Observation, SyncActor};
 use async_trait::async_trait;
 use std::collections::HashSet;
 
@@ -12,6 +12,8 @@ pub struct PingReceiverSyncActor {
 
 #[derive(Debug, Clone)]
 pub struct Ping;
+
+impl Message for Ping {}
 
 impl Actor for PingReceiverSyncActor {
     type Message = Ping;
@@ -25,13 +27,17 @@ impl Actor for PingReceiverSyncActor {
     fn observable_state(&self) -> Self::ObservableState {
         self.ping_count
     }
+
+    fn default_message(&self) -> Option<Self::Message> {
+        None
+    }
 }
 
 impl SyncActor for PingReceiverSyncActor {
     fn process_message(
         &mut self,
         _message: Self::Message,
-        _progress: &Progress,
+        _progress: Context<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         self.ping_count += 1;
         Ok(())
@@ -56,6 +62,8 @@ pub enum SenderMessage {
     Ping,
 }
 
+impl Message for SenderMessage {}
+
 impl Actor for PingerAsyncSenderActor {
     type Message = SenderMessage;
     type ObservableState = SenderState;
@@ -70,6 +78,10 @@ impl Actor for PingerAsyncSenderActor {
             num_peers: self.peers.len(),
         }
     }
+
+    fn default_message(&self) -> Option<Self::Message> {
+        None
+    }
 }
 
 #[async_trait]
@@ -77,7 +89,7 @@ impl AsyncActor for PingerAsyncSenderActor {
     async fn process_message(
         &mut self,
         message: SenderMessage,
-        _progress: &Progress,
+        _context: Context<'_, SenderMessage>,
     ) -> Result<(), MessageProcessError> {
         match message {
             SenderMessage::AddPeer(peer) => {
@@ -97,53 +109,65 @@ impl AsyncActor for PingerAsyncSenderActor {
 #[tokio::test]
 async fn test_ping_actor() {
     let kill_switch = KillSwitch::default();
-    let (ping_recv_mailbox, ping_recv_handle) =
-        PingReceiverSyncActor::default().spawn(10, kill_switch.clone());
-    let (ping_sender_mailbox, ping_sender_handle) =
-        PingerAsyncSenderActor::default().spawn(10, kill_switch.clone());
+    let ping_recv_handle =
+        PingReceiverSyncActor::default().spawn(Capacity::Bounded(10), kill_switch.clone());
+    let ping_sender_handle =
+        PingerAsyncSenderActor::default().spawn(Capacity::Bounded(10), kill_switch.clone());
     assert_eq!(ping_recv_handle.observe().await, Observation::Running(0));
     // No peers. This one will have no impact.
-    assert!(ping_sender_mailbox
+    let ping_recv_mailbox = ping_recv_handle.mailbox().clone();
+    assert!(ping_sender_handle
+        .mailbox()
         .send_async(SenderMessage::Ping)
         .await
         .is_ok());
-    assert!(ping_sender_mailbox
+    assert!(ping_sender_handle
+        .mailbox()
         .send_async(SenderMessage::AddPeer(ping_recv_mailbox.clone()))
         .await
         .is_ok());
     assert_eq!(
-        ping_sender_handle.observe().await,
+        ping_sender_handle.process_and_observe().await,
         Observation::Running(SenderState {
             num_peers: 1,
             count: 1
         })
     );
-    assert!(ping_sender_mailbox
+    assert!(ping_sender_handle
+        .mailbox()
         .send_async(SenderMessage::Ping)
         .await
         .is_ok());
-    assert!(ping_sender_mailbox
+    assert!(ping_sender_handle
+        .mailbox()
         .send_async(SenderMessage::Ping)
         .await
         .is_ok());
     assert_eq!(
-        ping_sender_handle.observe().await,
+        ping_sender_handle.process_and_observe().await,
         Observation::Running(SenderState {
             num_peers: 1,
             count: 3
         })
     );
-    assert_eq!(ping_recv_handle.observe().await, Observation::Running(2));
-    kill_switch.kill();
-    assert_eq!(ping_recv_handle.observe().await, Observation::Terminated(2));
     assert_eq!(
-        ping_sender_handle.observe().await,
+        ping_recv_handle.process_and_observe().await,
+        Observation::Running(2)
+    );
+    kill_switch.kill();
+    assert_eq!(
+        ping_recv_handle.process_and_observe().await,
+        Observation::Terminated(2)
+    );
+    assert_eq!(
+        ping_sender_handle.process_and_observe().await,
         Observation::Terminated(SenderState {
             num_peers: 1,
             count: 3
         })
     );
-    assert!(ping_sender_mailbox
+    assert!(ping_sender_handle
+        .mailbox()
         .send_async(SenderMessage::Ping)
         .await
         .is_err());
@@ -156,6 +180,8 @@ enum BuggyMessage {
     DoNothing,
     Block,
 }
+
+impl Message for BuggyMessage {}
 
 impl Actor for BuggyActor {
     type Message = BuggyMessage;
@@ -175,7 +201,7 @@ impl AsyncActor for BuggyActor {
     async fn process_message(
         &mut self,
         message: BuggyMessage,
-        _progress: &Progress,
+        _progress: Context<'_, BuggyMessage>,
     ) -> Result<(), MessageProcessError> {
         match message {
             BuggyMessage::Block => {
@@ -193,7 +219,8 @@ impl AsyncActor for BuggyActor {
 #[tokio::test]
 async fn test_timeouting_actor() {
     let kill_switch = KillSwitch::default();
-    let (buggy_mailbox, buggy_handle) = BuggyActor.spawn(10, kill_switch.clone());
+    let buggy_handle = BuggyActor.spawn(Capacity::Bounded(10), kill_switch.clone());
+    let buggy_mailbox = buggy_handle.mailbox().clone();
     assert_eq!(buggy_handle.observe().await, Observation::Running(()));
     assert!(buggy_mailbox
         .send_async(BuggyMessage::DoNothing)
@@ -205,4 +232,32 @@ async fn test_timeouting_actor() {
     tokio::time::sleep(crate::HEARTBEAT).await;
     tokio::time::sleep(crate::HEARTBEAT).await;
     assert_eq!(buggy_handle.observe().await, Observation::Terminated(()));
+}
+
+#[tokio::test]
+async fn test_pause_actor() {
+    let actor = PingReceiverSyncActor::default();
+    let kill_switch = KillSwitch::default();
+    let ping_handle = actor.spawn(Capacity::Unbounded, kill_switch);
+    for _ in 0..1000 {
+        assert!(ping_handle.mailbox().send_async(Ping).await.is_ok());
+    }
+    // Commands should be processed before message.
+    assert!(ping_handle
+        .mailbox()
+        .send_command(Command::Pause)
+        .await
+        .is_ok());
+    let first_state = *ping_handle.observe().await.state();
+    assert!(first_state < 1000);
+    let second_state = *ping_handle.observe().await.state();
+    assert_eq!(first_state, second_state);
+    assert!(ping_handle
+        .mailbox()
+        .send_command(Command::Start)
+        .await
+        .is_ok());
+    let end_state = *ping_handle.process_and_observe().await.state();
+    assert_eq!(end_state, 1000);
+    ping_handle.finish().await;
 }
