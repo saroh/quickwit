@@ -33,7 +33,7 @@ impl From<SendError> for MessageProcessError {
 /// - sync actors, executed on the blocking thread pool of tokio runtime.
 pub trait Actor: Send + Sync + 'static {
     /// Type of message that can be received by the actor.
-    type Message: Send + Sync + fmt::Debug;
+    type Message: Send + Clone + Sync + fmt::Debug;
     /// Piece of state that can be copied for assert in unit test, admin, etc.
     type ObservableState: Send + Clone + Sync + fmt::Debug;
     /// A name identifying the type of actor.
@@ -42,6 +42,8 @@ pub trait Actor: Send + Sync + 'static {
     fn name(&self) -> String {
         type_name::<Self>().to_string()
     }
+
+    fn default_message(&self) -> Option<Self::Message>;
 
     /// Extracts an observable state. Useful for unit test, and admin UI.
     ///

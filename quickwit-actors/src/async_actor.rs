@@ -38,12 +38,14 @@ pub trait AsyncActor: Actor + Sized {
         let (state_tx, state_rx) = watch::channel(self.observable_state());
         let actor_name = self.name();
         let progress = Progress::default();
+        let default_msg = self.default_message();
         let join_handle = tokio::spawn(async_actor_loop(
             self,
             receiver,
             state_tx,
             kill_switch.clone(),
             progress.clone(),
+            default_msg
         ));
         let mailbox = Mailbox::new(sender, actor_name);
         let actor_handle = ActorHandle::new(
@@ -57,25 +59,60 @@ pub trait AsyncActor: Actor + Sized {
     }
 }
 
+async fn try_recv_msg<M: Clone>(
+    inbox: &mut flume::Receiver<ActorMessage<M>>,
+    default_msg_opt: Option<&M>
+) -> Result<Option<ActorMessage<M>>, ActorTermination> {
+    if let Some(default_msg) = default_msg_opt {
+        match inbox.try_recv() {
+            Ok(msg) => Ok(Some(msg)),
+            Err(flume::TryRecvError::Disconnected) =>
+                Err(ActorTermination::Disconnect),
+            Err(flume::TryRecvError::Empty) =>
+                Ok(Some(ActorMessage::Message(default_msg.clone())))
+        }
+    } else {
+        match timeout(crate::HEARTBEAT.mul_f32(0.2), inbox.recv_async()).await {
+            Ok(Ok(msg)) =>
+                Ok(Some(msg)),
+            Ok(Err(_recv_error)) =>
+                Err(ActorTermination::Disconnect),
+            Err(_timeout_error) => Ok(None)
+        }
+    }
+}
+
 async fn async_actor_loop<A: AsyncActor>(
     mut actor: A,
-    inbox: flume::Receiver<ActorMessage<A::Message>>,
+    mut inbox: flume::Receiver<ActorMessage<A::Message>>,
     state_tx: watch::Sender<A::ObservableState>,
     kill_switch: KillSwitch,
     progress: Progress,
+    default_msg_opt: Option<A::Message>,
 ) -> ActorTermination {
     loop {
         if !kill_switch.is_alive() {
             return ActorTermination::KillSwitch;
         }
         progress.record_progress();
-        let async_msg_res = timeout(crate::HEARTBEAT.mul_f32(0.2), inbox.recv_async()).await;
+        let async_msg_opt =
+            match try_recv_msg(&mut inbox, default_msg_opt.as_ref()).await {
+                Ok(async_msg_opt) => async_msg_opt,
+                Err(actor_termination) => {
+                    return actor_termination;
+                }
+            };
         progress.record_progress();
         if !kill_switch.is_alive() {
             return ActorTermination::KillSwitch;
         }
-        match async_msg_res {
-            Ok(Ok(ActorMessage::Message(message))) => {
+        let async_msg = if let Some(async_msg) = async_msg_opt {
+            async_msg
+        } else {
+            continue;
+        };
+        match async_msg {
+            ActorMessage::Message(message) => {
                 match actor.process_message(message, &progress).await {
                     Ok(()) => (),
                     Err(MessageProcessError::OnDemand) => return ActorTermination::OnDemand,
@@ -89,19 +126,12 @@ async fn async_actor_loop<A: AsyncActor>(
                     }
                 }
             }
-            Ok(Ok(ActorMessage::Observe(oneshot))) => {
+            ActorMessage::Observe(oneshot) => {
                 let state = actor.observable_state();
                 let _ = state_tx.send(state);
                 // We voluntarily ignore the error here. (An error only occurs if the
                 // sender dropped its receiver.)
                 let _ = oneshot.send(());
-            }
-            Ok(Err(_)) => {
-                return ActorTermination::Disconnect;
-            }
-            Err(_) => {
-                // this is just a timeout.
-                continue;
             }
         }
     }
