@@ -1,3 +1,4 @@
+use quickwit_index_config::ShardId;
 use quickwit_metastore::Checkpoint;
 
 use crate::models::{IndexId, SourceId};
@@ -24,7 +25,6 @@ use crate::models::{IndexId, SourceId};
 
 #[derive(Debug, Clone)]
 pub struct SplitLabel {
-    pub source: SourceId,
     pub index: IndexId,
-    pub shard_id: usize,
+    pub shard_id: ShardId,
 }

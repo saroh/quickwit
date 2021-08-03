@@ -57,8 +57,8 @@ impl Scratch {
     }
 }
 
+#[derive(Clone)]
 pub struct IndexerParams {
-    pub index: String,
     pub index_config: Arc<dyn IndexConfig>,
     pub mem_budget_in_bytes: usize,
 }
@@ -134,7 +134,7 @@ impl SyncActor for Indexer {
             index_writer.add_document(doc);
         }
         self.checkpoint
-            .update_checkpoint(document_batch.checkpoint_update);
+            .update_checkpoint(document_batch.checkpoint_update)?;
         Ok(())
     }
 

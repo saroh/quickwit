@@ -18,8 +18,9 @@
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use anyhow::bail;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::{cmp::Ordering, collections::{HashMap, hash_map::Entry}};
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct Checkpoint {
@@ -27,11 +28,31 @@ pub struct Checkpoint {
 }
 
 impl Checkpoint {
-    /// Update the position shipped in the `checkpoint_update`.
-    pub fn update_checkpoint(&mut self, checkpoint_update: Checkpoint) {
-        for (partition_id, partition_position) in checkpoint_update.per_partition_position {
-            self.per_partition_position
-                .insert(partition_id, partition_position);
+    pub fn is_strictly_before(&self, other: &Self) -> bool {
+        for (partition_id, offset) in &other.per_partition_position {
+            if let Some(original_checkpoint) = self.per_partition_position.get(partition_id) {
+                match original_checkpoint[..].cmp(&offset[..]) {
+                    Ordering::Less | Ordering::Equal => {
+                        return false;
+                    },
+                    Ordering::Greater => {},
+                }
+            }
         }
+        true
+    }
+
+    /// Update the position shipped in the `checkpoint_update`.
+    pub fn update_checkpoint(&mut self, checkpoint_update: Checkpoint) -> anyhow::Result<()> {
+        if !self.is_strictly_before(&checkpoint_update) {
+            bail!("Checkpoint is not allowed");
+        }
+        for (partition_id, partition_position) in checkpoint_update.per_partition_position {
+            self.per_partition_position.insert(partition_id, partition_position);
+        }
+        Ok(())
     }
 }
+
+
+// TODO tests

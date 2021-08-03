@@ -29,7 +29,6 @@ use quickwit_core::DocumentSource;
 use quickwit_index_config::DefaultIndexConfigBuilder;
 use quickwit_index_config::IndexConfig;
 use quickwit_index_config::StaticRoutingConfig;
-use quickwit_metastore::Checkpoint;
 use quickwit_metastore::IndexMetadata;
 use quickwit_metastore::MetastoreUriResolver;
 use quickwit_proto::SearchRequest;

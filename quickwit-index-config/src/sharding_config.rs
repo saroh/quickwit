@@ -29,69 +29,74 @@ use crate::{ShardId, TenantId};
 
 //TODO make sure we can evolve out of the serialization format
 
-#[derive(Debug, Clone)]
-pub struct StaticRoutingConfig(Arc<StaticRoutingConfigInner>);
+// TODO clone is slow
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StaticRoutingConfig {
+    SingleTenant {
+        shard_config: ShardConfig
+    },
+    Multitenant {
+        tenant_key: String,
+        shards: HashMap<ShardId, ShardConfig>,
+        tenants: HashMap<TenantId, TenantConfig>
+    }
+}
 
 impl StaticRoutingConfig {
-    pub fn tenant_key(&self) -> &str {
-        &self.0.tenant_key
-    }
-
-    pub fn shards(&self) -> &HashMap<ShardId, ShardConfig> {
-        &self.0.shards
-    }
-
-    pub fn tenants(&self) -> &HashMap<TenantId, TenantConfig> {
-        &self.0.tenants
+    pub fn shard_configs(&self) -> Vec<(ShardId, ShardConfig)> {
+        match self {
+            StaticRoutingConfig::SingleTenant { shard_config } => {
+                vec![("default-shard".to_string(), shard_config.clone())]
+            },
+            StaticRoutingConfig::Multitenant { shards, .. } => {
+                shards
+                    .iter()
+                    .map(|(shard_id, shard_config)| {
+                        (shard_id.to_string(), shard_config.clone())
+                    })
+                    .collect::<Vec<(String, ShardConfig)>>()
+            }
+        }
     }
 }
 
 impl Default for StaticRoutingConfig {
     fn default() -> Self {
-        unimplemented!()
+        StaticRoutingConfig::SingleTenant {
+            shard_config: ShardConfig {
+                shard_id: "default-shard".to_string(),
+                mem_budget_in_bytes: 3_000_000,
+                commit_policy: CommitPolicy::default()
+            }
+        }
     }
 }
 
-impl Serialize for StaticRoutingConfig {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer {
-        self.0.serialize(serializer)
-    }
-}
-
-impl<'de> Deserialize<'de> for StaticRoutingConfig {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de> {
-        let inner = StaticRoutingConfigInner::deserialize(deserializer)?;
-        Ok(StaticRoutingConfig(Arc::new(inner)))
-    }
-}
-
-
-#[derive(Debug, Serialize, Deserialize)]
-struct StaticRoutingConfigInner {
-    pub tenant_key: String,
-    pub shards: HashMap<ShardId, ShardConfig>,
-    pub tenants: HashMap<TenantId, TenantConfig>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenantConfig {
     pub tenant_id: String,
     pub target_shard: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ShardConfig {
     pub shard_id: String,
     pub mem_budget_in_bytes: u64,
     pub commit_policy: CommitPolicy
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct CommitPolicy {
     pub max_docs: usize,
     pub timeout: Duration,
+}
+
+impl Default for CommitPolicy {
+    fn default() -> Self {
+        CommitPolicy {
+            max_docs: 5_000_000,
+            timeout: Duration::from_secs(60 * 30)
+        }
+    }
 }

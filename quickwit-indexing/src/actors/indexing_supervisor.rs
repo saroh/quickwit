@@ -1,23 +1,3 @@
-use std::sync::Arc;
-
-use anyhow::Context;
-use quickwit_actors::AsyncActor;
-use quickwit_actors::KillSwitch;
-use quickwit_actors::Mailbox;
-use quickwit_actors::SyncActor;
-use quickwit_index_config::IndexConfig;
-use quickwit_metastore::Metastore;
-use quickwit_metastore::MetastoreUriResolver;
-use quickwit_storage::StorageUriResolver;
-
-use crate::actors::Indexer;
-use crate::actors::IndexerParams;
-use crate::actors::Packager;
-use crate::actors::Publisher;
-use crate::actors::Uploader;
-use crate::models::Batch;
-use crate::models::SplitLabel;
-
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
 //
@@ -38,7 +18,24 @@ use crate::models::SplitLabel;
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::sync::Arc;
+use anyhow::Context;
+use quickwit_actors::AsyncActor;
+use quickwit_actors::KillSwitch;
+use quickwit_actors::Mailbox;
+use quickwit_actors::SyncActor;
+use quickwit_metastore::Metastore;
+use quickwit_storage::StorageUriResolver;
+use crate::actors::Indexer;
+use crate::actors::IndexerParams;
+use crate::actors::Packager;
+use crate::actors::Publisher;
+use crate::actors::Uploader;
+use crate::models::Batch;
+use crate::models::SplitLabel;
+
 const MEM_BUDGET_IN_BYTES: usize = 500_000_000; // MAKE THIS CONFIGURABLE
+
 pub struct IndexingSupervisor {
     index_id: String,
     metastore: Arc<dyn Metastore>,
@@ -92,25 +89,19 @@ impl IndexingSupervisor {
         let (packager_mailbox, _packager_handler) = packager.spawn(1, kill_switch.clone());
 
         let indexer_params = IndexerParams {
-            index: self.index_id.clone(),
             index_config: Arc::from(index_metadata.index_config.clone()),
             mem_budget_in_bytes: MEM_BUDGET_IN_BYTES,
         };
 
         let mut mailboxes: Vec<Mailbox<Batch>> = Vec::new();
-        for (shard_id, shard_config) in index_metadata.sharding_config.shards().iter().enumerate() {
+        for (shard_id, shard_config) in index_metadata.sharding_config.shard_configs() {
             let split_label = SplitLabel {
-                source: "<fixme>".to_string(), // TODO Fixme
                 index: self.index_id.to_string(),
                 shard_id,
             };
-            let indexer_params = IndexerParams {
-                index: self.index_id.clone(),
-                index_config: Arc::from(index_metadata.index_config.clone()),
-                mem_budget_in_bytes: MEM_BUDGET_IN_BYTES
-            };
+
             let writer: Indexer = Indexer::new(
-                indexer_params,
+                indexer_params.clone(),
                 split_label,
                 packager_mailbox.clone(),
             )?;
@@ -127,6 +118,11 @@ impl IndexingSupervisor {
         // .await?;
         // source.spawn()?;
 
+        Ok(())
+    }
+
+    pub async fn spawn(&self,) -> anyhow::Result<()> {
+        self.spawn_indexing_pipeline().await?;
         Ok(())
     }
 }
