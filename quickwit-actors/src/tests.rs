@@ -3,6 +3,7 @@ use crate::mailbox::{Capacity, Command};
 use crate::{AsyncActor, Context, Mailbox, Message, MessageProcessError, Observation, SyncActor};
 use async_trait::async_trait;
 use std::collections::HashSet;
+use std::time::Duration;
 
 // An actor that receives ping messages.
 #[derive(Default)]
@@ -44,6 +45,41 @@ impl SyncActor for PingReceiverSyncActor {
     }
 }
 
+// An actor that receives ping messages.
+#[derive(Default)]
+pub struct PingReceiverAsyncActor {
+    ping_count: usize,
+}
+
+impl Actor for PingReceiverAsyncActor {
+    type Message = Ping;
+
+    type ObservableState = usize;
+
+    fn name(&self) -> String {
+        "Ping".to_string()
+    }
+
+    fn observable_state(&self) -> Self::ObservableState {
+        self.ping_count
+    }
+
+    fn default_message(&self) -> Option<Self::Message> {
+        None
+    }
+}
+
+#[async_trait]
+impl AsyncActor for PingReceiverAsyncActor {
+    async fn process_message(
+        &mut self,
+        _message: Self::Message,
+        _progress: Context<'_, Self::Message>,
+    ) -> Result<(), MessageProcessError> {
+        self.ping_count += 1;
+        Ok(())
+    }
+}
 #[derive(Default)]
 pub struct PingerAsyncSenderActor {
     count: usize,
@@ -235,7 +271,7 @@ async fn test_timeouting_actor() {
 }
 
 #[tokio::test]
-async fn test_pause_actor() {
+async fn test_pause_sync_actor() {
     let actor = PingReceiverSyncActor::default();
     let kill_switch = KillSwitch::default();
     let ping_handle = actor.spawn(Capacity::Unbounded, kill_switch);
@@ -259,5 +295,120 @@ async fn test_pause_actor() {
         .is_ok());
     let end_state = *ping_handle.process_and_observe().await.state();
     assert_eq!(end_state, 1000);
-    ping_handle.finish().await;
 }
+
+#[tokio::test]
+async fn test_pause_async_actor() {
+    let actor = PingReceiverAsyncActor::default();
+    let kill_switch = KillSwitch::default();
+    let ping_handle = actor.spawn(Capacity::Unbounded, kill_switch);
+    for _ in 0u32..1000u32 {
+        assert!(ping_handle.mailbox().send_async(Ping).await.is_ok());
+    }
+    assert!(ping_handle
+        .mailbox()
+        .send_command(Command::Pause)
+        .await
+        .is_ok());
+    let first_state = *ping_handle.observe().await.state();
+    assert!(first_state < 1000);
+    let second_state = *ping_handle.observe().await.state();
+    assert_eq!(first_state, second_state);
+    assert!(ping_handle
+        .mailbox()
+        .send_command(Command::Start)
+        .await
+        .is_ok());
+    let end_state = *ping_handle.process_and_observe().await.state();
+    assert_eq!(end_state, 1000);
+}
+
+
+#[derive(Default, Debug, Clone)]
+struct DefaultMessageActor {
+    pub default_count: usize,
+    pub normal_count: usize,
+}
+
+#[derive(Clone, Debug)]
+enum Msg {
+    Default,
+    Normal,
+}
+
+impl Message for Msg {}
+
+impl Actor for DefaultMessageActor {
+    type Message = Msg;
+
+    type ObservableState = Self;
+
+    fn observable_state(&self) -> Self::ObservableState {
+        self.clone()
+    }
+
+    fn default_message(&self) -> Option<Self::Message> {
+        Some(Msg::Default)
+    }
+}
+
+#[async_trait]
+impl AsyncActor for DefaultMessageActor {
+    async fn process_message(
+        &mut self,
+        message: Self::Message,
+        _ctx: Context<'_, Self::Message>,
+    ) -> Result<(), MessageProcessError> {
+        match message {
+            Msg::Default => { self.default_count += 1; },
+            Msg::Normal => { self.normal_count += 1; }
+        }
+        Ok(())
+    }
+}
+
+impl SyncActor for DefaultMessageActor {
+    fn process_message(
+        &mut self,
+        message: Self::Message,
+        _ctx: Context<'_, Self::Message>,
+    ) -> Result<(), MessageProcessError> {
+        match message {
+            Msg::Default => { self.default_count += 1; },
+            Msg::Normal => { self.normal_count += 1; }
+        }
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn test_default_message_async() {
+    let actor_with_default_msg = DefaultMessageActor::default();
+    let actor_with_default_msg_handle = AsyncActor::spawn(actor_with_default_msg, Capacity::Unbounded, KillSwitch::default());
+    assert!(actor_with_default_msg_handle
+        .mailbox()
+        .send_async(Msg::Normal)
+        .await
+        .is_ok());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let state = actor_with_default_msg_handle.process_and_observe().await.state().clone();
+    assert_eq!(state.normal_count, 1);
+    assert!(state.default_count > 0);
+}
+
+
+#[tokio::test]
+async fn test_default_message_sync() {
+    let actor_with_default_msg = DefaultMessageActor::default();
+    let actor_with_default_msg_handle = SyncActor::spawn(actor_with_default_msg, Capacity::Unbounded, KillSwitch::default());
+    assert!(actor_with_default_msg_handle
+        .mailbox()
+        .send_async(Msg::Normal)
+        .await
+        .is_ok());
+    tokio::time::sleep(Duration::from_millis(10)).await;
+    let state = actor_with_default_msg_handle.process_and_observe().await.state().clone();
+    assert_eq!(state.normal_count, 1);
+    assert!(state.default_count > 1);
+}
+

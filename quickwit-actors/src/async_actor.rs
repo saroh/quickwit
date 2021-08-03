@@ -1,28 +1,11 @@
 use crate::actor::MessageProcessError;
 use crate::actor_handle::{ActorHandle, ActorTermination};
 use crate::mailbox::{create_mailbox, Capacity, Command, Inbox};
-use crate::{Actor, KillSwitch, Progress, ReceptionResult};
-use crate::{Mailbox, Message};
+use crate::{Actor, Context, KillSwitch, Progress, ReceptionResult};
+use crate::Mailbox;
 use async_trait::async_trait;
 use tokio::sync::watch;
-use tracing::error;
 
-pub struct Context<'a, M: Message> {
-    pub self_mailbox: &'a Mailbox<M>,
-    pub progress: &'a Progress,
-}
-
-impl<'a, M: Message> Context<'a, M> {
-    pub async fn self_send_async(&self, msg: M) {
-        if let Err(_send_err) = self.self_mailbox.send_async(msg).await {
-            error!("Failed to send error to self. This should never happen.");
-        }
-    }
-
-    pub fn record_progress(&self) {
-        self.progress.record_progress();
-    }
-}
 
 /// An async actor is executed on a regular tokio task.
 ///
@@ -52,8 +35,7 @@ pub trait AsyncActor: Actor + Sized {
         let (state_tx, state_rx) = watch::channel(self.observable_state());
         let actor_name = self.name();
         let progress = Progress::default();
-        let default_message_opt = self.default_message();
-        let (mailbox, inbox) = create_mailbox(actor_name, capacity, default_message_opt);
+        let (mailbox, inbox) = create_mailbox(actor_name, capacity);
         let join_handle = tokio::spawn(async_actor_loop(
             self,
             inbox,
@@ -82,15 +64,24 @@ async fn async_actor_loop<A: AsyncActor>(
     progress: Progress,
 ) -> ActorTermination {
     let mut running = true;
+    let default_message_opt = actor.default_message();
     loop {
         if !kill_switch.is_alive() {
             return ActorTermination::KillSwitch;
         }
         progress.record_progress();
-        let reception_result = inbox.try_recv_msg_async(running).await;
+        let mut reception_result = inbox.try_recv_msg_async(running).await;
         progress.record_progress();
         if !kill_switch.is_alive() {
             return ActorTermination::KillSwitch;
+        }
+        if let ReceptionResult::None = reception_result {
+            if self_mailbox.is_last_mailbox() {
+                return ActorTermination::Disconnect;
+            }
+            if let Some(default_message) = default_message_opt.as_ref() {
+                reception_result = ReceptionResult::Message(default_message.clone());
+            }
         }
         match reception_result {
             ReceptionResult::Command(cmd) => {
@@ -107,10 +98,10 @@ async fn async_actor_loop<A: AsyncActor>(
                     }
                     Command::Observe(cb) => {
                         let state = actor.observable_state();
-                        let _ = state_tx.send(state);
                         // We voluntarily ignore the error here. (An error only occurs if the
                         // sender dropped its receiver.)
-                        let _ = cb.send(());
+                        let _ = state_tx.send(state);
+                        let _er = cb.send(());
                     }
                 }
             }
@@ -133,7 +124,11 @@ async fn async_actor_loop<A: AsyncActor>(
                 }
             }
             ReceptionResult::None => {
-                continue;
+                if self_mailbox.is_last_mailbox() {
+                    return ActorTermination::Disconnect;
+                } else {
+                    continue;
+                }
             }
             ReceptionResult::Disconnect => {
                 return ActorTermination::Disconnect;

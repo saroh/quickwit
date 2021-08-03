@@ -3,8 +3,9 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
+use tracing::error;
 
-use crate::{Message, SendError};
+use crate::{Mailbox, Message, SendError};
 
 #[derive(Error, Debug)]
 pub enum MessageProcessError {
@@ -101,6 +102,22 @@ impl KillSwitch {
 
     pub fn is_alive(&self) -> bool {
         self.alive.load(Ordering::Relaxed)
+    }
+}
+pub struct Context<'a, M: Message> {
+    pub self_mailbox: &'a Mailbox<M>,
+    pub progress: &'a Progress,
+}
+
+impl<'a, M: Message> Context<'a, M> {
+    pub async fn self_send_async(&self, msg: M) {
+        if let Err(_send_err) = self.self_mailbox.send_async(msg).await {
+            error!("Failed to send error to self. This should never happen.");
+        }
+    }
+
+    pub fn record_progress(&self) {
+        self.progress.record_progress();
     }
 }
 
