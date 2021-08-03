@@ -5,7 +5,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tracing::error;
 
-use crate::{Mailbox, Message, SendError};
+use crate::{Mailbox, SendError};
 
 #[derive(Error, Debug)]
 pub enum MessageProcessError {
@@ -34,9 +34,9 @@ impl From<SendError> for MessageProcessError {
 /// - sync actors, executed on the blocking thread pool of tokio runtime.
 pub trait Actor: Send + Sync + 'static {
     /// Type of message that can be received by the actor.
-    type Message: Message;
+    type Message: Send + Sync + Clone + fmt::Debug;
     /// Piece of state that can be copied for assert in unit test, admin, etc.
-    type ObservableState: Send + Clone + Sync + fmt::Debug;
+    type ObservableState: Send + Sync + Clone + fmt::Debug;
     /// A name identifying the type of actor.
     /// It does not need to be "instance-unique", and can be the name of
     /// the actor implementation.
@@ -104,13 +104,13 @@ impl KillSwitch {
         self.alive.load(Ordering::Relaxed)
     }
 }
-pub struct Context<'a, M: Message> {
-    pub self_mailbox: &'a Mailbox<M>,
+pub struct Context<'a, Message> {
+    pub self_mailbox: &'a Mailbox<Message>,
     pub progress: &'a Progress,
 }
 
-impl<'a, M: Message> Context<'a, M> {
-    pub async fn self_send_async(&self, msg: M) {
+impl<'a, Message> Context<'a, Message> {
+    pub async fn self_send_async(&self, msg: Message) {
         if let Err(_send_err) = self.self_mailbox.send_async(msg).await {
             error!("Failed to send error to self. This should never happen.");
         }

@@ -6,7 +6,7 @@ use tokio::time::timeout;
 use tracing::error;
 
 use crate::mailbox::Command;
-use crate::{KillSwitch, Mailbox, Message, Observation, Progress};
+use crate::{KillSwitch, Mailbox, Observation, Progress};
 
 /// An Actor Handle serves as an address to communicate with an actor.
 ///
@@ -17,17 +17,17 @@ use crate::{KillSwitch, Mailbox, Message, Observation, Progress};
 /// Because `ActorHandle`'s generic types are Message and Observable, as opposed
 /// to the actor type, `ActorHandle` are interchangeable.
 /// It makes it possible to plug different implementations, have actor proxy etc.
-pub struct ActorHandle<M: Message, ObservableState> {
+pub struct ActorHandle<M, ObservableState> {
     inner: Arc<InnerActorHandle<M, ObservableState>>,
 }
 
-impl<M: Message, ObservableState> fmt::Debug for ActorHandle<M, ObservableState> {
+impl<M, ObservableState> fmt::Debug for ActorHandle<M, ObservableState> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ActorHandle({})", self.inner.mailbox.actor_name())
     }
 }
 
-impl<M: Message, ObservableState> Clone for ActorHandle<M, ObservableState> {
+impl<Message, ObservableState> Clone for ActorHandle<Message, ObservableState> {
     fn clone(&self) -> Self {
         ActorHandle {
             inner: self.inner.clone(),
@@ -35,9 +35,9 @@ impl<M: Message, ObservableState> Clone for ActorHandle<M, ObservableState> {
     }
 }
 
-impl<M: Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<M, ObservableState> {
+impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, ObservableState> {
     pub(crate) fn new(
-        mailbox: Mailbox<M>,
+        mailbox: Mailbox<Message>,
         last_state: watch::Receiver<ObservableState>,
         join_handle: JoinHandle<ActorTermination>,
         progress: Progress,
@@ -66,7 +66,7 @@ impl<M: Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<M, Obse
         }
     }
 
-    pub fn mailbox(&self) -> &Mailbox<M> {
+    pub fn mailbox(&self) -> &Mailbox<Message> {
         &self.inner.as_ref().mailbox
     }
 
@@ -150,8 +150,8 @@ impl<M: Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<M, Obse
     }
 }
 
-struct InnerActorHandle<M: Message, ObservableState> {
-    mailbox: Mailbox<M>,
+struct InnerActorHandle<Message, ObservableState> {
+    mailbox: Mailbox<Message>,
     join_handle: JoinHandle<ActorTermination>,
     kill_switch: KillSwitch,
     last_state: watch::Receiver<ObservableState>,
@@ -171,12 +171,12 @@ pub enum ActorTermination {
     DownstreamClosed,
 }
 
-pub(crate) enum ActorMessage<M: Message> {
-    Message(M),
+pub(crate) enum ActorMessage<Message> {
+    Message(Message),
     Observe(oneshot::Sender<()>),
 }
 
-impl<M: Message> fmt::Debug for ActorMessage<M> {
+impl<Message: fmt::Debug> fmt::Debug for ActorMessage<Message> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Message(msg) => {

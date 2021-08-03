@@ -30,25 +30,25 @@ use uuid::Uuid;
 use crate::actor_handle::ActorMessage;
 
 #[derive(Clone)]
-pub struct Mailbox<M: Message> {
+pub struct Mailbox<M> {
     inner: Arc<Inner<M>>,
 }
 
-impl<M: Message> Mailbox<M> {
+impl<M: Send + Sync + fmt::Debug + Clone> Mailbox<M> {
     pub(crate) fn is_last_mailbox(&self) -> bool {
         Arc::strong_count(&self.inner) == 1
     }
 }
 
-impl<M: Message> Deref for Mailbox<M> {
-    type Target = Inner<M>;
+impl<Message> Deref for Mailbox<Message> {
+    type Target = Inner<Message>;
 
     fn deref(&self) -> &Self::Target {
         self.inner.as_ref()
     }
 }
 
-pub struct Inner<M: Message> {
+pub struct Inner<M> {
     sender: flume::Sender<ActorMessage<M>>,
     command_sender: flume::Sender<Command>,
     id: Uuid,
@@ -73,19 +73,19 @@ impl fmt::Debug for Command {
     }
 }
 
-impl<M: Message> fmt::Debug for Mailbox<M> {
+impl<M: Sync + Send + fmt::Debug + Clone> fmt::Debug for Mailbox<M> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Mailbox({})", self.actor_name())
     }
 }
 
-impl<M: Message> Hash for Mailbox<M> {
+impl<Message> Hash for Mailbox<Message> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state)
     }
 }
 
-impl<M: Message> PartialEq for Mailbox<M> {
+impl<Message> PartialEq for Mailbox<Message> {
     fn eq(&self, other: &Self) -> bool {
         self.id.eq(&other.id)
     }
@@ -93,14 +93,17 @@ impl<M: Message> PartialEq for Mailbox<M> {
 
 pub struct SendError;
 
-impl<M: Message> Eq for Mailbox<M> {}
+impl<Message> Eq for Mailbox<Message> {}
 
-impl<M: Message> Mailbox<M> {
+impl<Message> Mailbox<Message> {
     pub fn actor_name(&self) -> String {
         format!("{}:{}", self.actor_name, self.id)
     }
 
-    pub(crate) async fn send_actor_message(&self, msg: ActorMessage<M>) -> Result<(), SendError> {
+    pub(crate) async fn send_actor_message(
+        &self,
+        msg: ActorMessage<Message>,
+    ) -> Result<(), SendError> {
         self.sender.send_async(msg).await.map_err(|_| SendError)
     }
 
@@ -109,7 +112,7 @@ impl<M: Message> Mailbox<M> {
     /// SendError is returned if the user is already terminated.
     ///
     /// (See also [Self::send_blocking()])
-    pub async fn send_async(&self, msg: M) -> Result<(), SendError> {
+    pub async fn send_async(&self, msg: Message) -> Result<(), SendError> {
         self.send_actor_message(ActorMessage::Message(msg)).await
     }
 
@@ -117,7 +120,7 @@ impl<M: Message> Mailbox<M> {
     /// When possible, prefer using [Self::send_async()].
     ///
     // TODO do we need a version with a deadline?
-    pub fn send_blocking(&self, msg: M) -> Result<(), SendError> {
+    pub fn send_blocking(&self, msg: Message) -> Result<(), SendError> {
         self.sender
             .send(ActorMessage::Message(msg))
             .map_err(|_e| SendError)
@@ -135,8 +138,8 @@ impl<M: Message> Mailbox<M> {
     }
 }
 
-pub struct Inbox<M: Message> {
-    rx: flume::Receiver<ActorMessage<M>>,
+pub struct Inbox<Message> {
+    rx: flume::Receiver<ActorMessage<Message>>,
     command_rx: flume::Receiver<Command>,
 }
 
@@ -148,8 +151,8 @@ pub enum ReceptionResult<M> {
     Disconnect,
 }
 
-impl<M: Message> Inbox<M> {
-    fn get_command_if_available(&self) -> Option<ReceptionResult<M>> {
+impl<Message> Inbox<Message> {
+    fn get_command_if_available(&self) -> Option<ReceptionResult<Message>> {
         match self.command_rx.try_recv() {
             Ok(command) => Some(ReceptionResult::Command(command)),
             Err(flume::TryRecvError::Disconnected) => Some(ReceptionResult::Disconnect),
@@ -157,7 +160,7 @@ impl<M: Message> Inbox<M> {
         }
     }
 
-    pub async fn try_recv_msg_async(&self, message_enabled: bool) -> ReceptionResult<M> {
+    pub async fn try_recv_msg_async(&self, message_enabled: bool) -> ReceptionResult<Message> {
         if let Some(command) = self.get_command_if_available() {
             tokio::task::yield_now().await;
             return command;
@@ -174,7 +177,7 @@ impl<M: Message> Inbox<M> {
         }
     }
 
-    pub fn try_recv_msg(&self, message_enabled: bool) -> ReceptionResult<M> {
+    pub fn try_recv_msg(&self, message_enabled: bool) -> ReceptionResult<Message> {
         if let Some(command) = self.get_command_if_available() {
             return command;
         }
@@ -197,8 +200,6 @@ pub enum Capacity {
     Unbounded,
 }
 
-pub trait Message: Send + Sync + Clone + fmt::Debug {}
-
 impl Capacity {
     fn create_channel<M>(&self) -> (flume::Sender<M>, flume::Receiver<M>) {
         match *self {
@@ -208,7 +209,7 @@ impl Capacity {
     }
 }
 
-pub fn create_mailbox<M: Message>(
+pub fn create_mailbox<M: Send + Sync + Clone + fmt::Debug>(
     actor_name: String,
     capacity: Capacity,
 ) -> (Mailbox<M>, Inbox<M>) {

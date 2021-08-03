@@ -1,6 +1,6 @@
 use crate::actor::{Actor, KillSwitch};
 use crate::mailbox::{Capacity, Command};
-use crate::{AsyncActor, Context, Mailbox, Message, MessageProcessError, Observation, SyncActor};
+use crate::{AsyncActor, Context, Mailbox, MessageProcessError, Observation, SyncActor};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -13,8 +13,6 @@ pub struct PingReceiverSyncActor {
 
 #[derive(Debug, Clone)]
 pub struct Ping;
-
-impl Message for Ping {}
 
 impl Actor for PingReceiverSyncActor {
     type Message = Ping;
@@ -97,8 +95,6 @@ pub enum SenderMessage {
     AddPeer(Mailbox<Ping>),
     Ping,
 }
-
-impl Message for SenderMessage {}
 
 impl Actor for PingerAsyncSenderActor {
     type Message = SenderMessage;
@@ -217,8 +213,6 @@ enum BuggyMessage {
     Block,
 }
 
-impl Message for BuggyMessage {}
-
 impl Actor for BuggyActor {
     type Message = BuggyMessage;
     type ObservableState = ();
@@ -323,7 +317,6 @@ async fn test_pause_async_actor() {
     assert_eq!(end_state, 1000);
 }
 
-
 #[derive(Default, Debug, Clone)]
 struct DefaultMessageActor {
     pub default_count: usize,
@@ -335,8 +328,6 @@ enum Msg {
     Default,
     Normal,
 }
-
-impl Message for Msg {}
 
 impl Actor for DefaultMessageActor {
     type Message = Msg;
@@ -360,8 +351,12 @@ impl AsyncActor for DefaultMessageActor {
         _ctx: Context<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         match message {
-            Msg::Default => { self.default_count += 1; },
-            Msg::Normal => { self.normal_count += 1; }
+            Msg::Default => {
+                self.default_count += 1;
+            }
+            Msg::Normal => {
+                self.normal_count += 1;
+            }
         }
         Ok(())
     }
@@ -374,8 +369,12 @@ impl SyncActor for DefaultMessageActor {
         _ctx: Context<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         match message {
-            Msg::Default => { self.default_count += 1; },
-            Msg::Normal => { self.normal_count += 1; }
+            Msg::Default => {
+                self.default_count += 1;
+            }
+            Msg::Normal => {
+                self.normal_count += 1;
+            }
         }
         Ok(())
     }
@@ -384,31 +383,45 @@ impl SyncActor for DefaultMessageActor {
 #[tokio::test]
 async fn test_default_message_async() {
     let actor_with_default_msg = DefaultMessageActor::default();
-    let actor_with_default_msg_handle = AsyncActor::spawn(actor_with_default_msg, Capacity::Unbounded, KillSwitch::default());
+    let actor_with_default_msg_handle = AsyncActor::spawn(
+        actor_with_default_msg,
+        Capacity::Unbounded,
+        KillSwitch::default(),
+    );
     assert!(actor_with_default_msg_handle
         .mailbox()
         .send_async(Msg::Normal)
         .await
         .is_ok());
     tokio::time::sleep(Duration::from_millis(10)).await;
-    let state = actor_with_default_msg_handle.process_and_observe().await.state().clone();
+    let state = actor_with_default_msg_handle
+        .process_and_observe()
+        .await
+        .state()
+        .clone();
     assert_eq!(state.normal_count, 1);
     assert!(state.default_count > 0);
 }
 
-
 #[tokio::test]
 async fn test_default_message_sync() {
     let actor_with_default_msg = DefaultMessageActor::default();
-    let actor_with_default_msg_handle = SyncActor::spawn(actor_with_default_msg, Capacity::Unbounded, KillSwitch::default());
+    let actor_with_default_msg_handle = SyncActor::spawn(
+        actor_with_default_msg,
+        Capacity::Unbounded,
+        KillSwitch::default(),
+    );
     assert!(actor_with_default_msg_handle
         .mailbox()
         .send_async(Msg::Normal)
         .await
         .is_ok());
     tokio::time::sleep(Duration::from_millis(10)).await;
-    let state = actor_with_default_msg_handle.process_and_observe().await.state().clone();
+    let state = actor_with_default_msg_handle
+        .process_and_observe()
+        .await
+        .state()
+        .clone();
     assert_eq!(state.normal_count, 1);
     assert!(state.default_count > 1);
 }
-

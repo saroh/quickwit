@@ -1,11 +1,10 @@
 use crate::actor::MessageProcessError;
 use crate::actor_handle::{ActorHandle, ActorTermination};
 use crate::mailbox::{create_mailbox, Capacity, Command, Inbox};
-use crate::{Actor, Context, KillSwitch, Progress, ReceptionResult};
 use crate::Mailbox;
+use crate::{Actor, Context, KillSwitch, Progress, ReceptionResult};
 use async_trait::async_trait;
 use tokio::sync::watch;
-
 
 /// An async actor is executed on a regular tokio task.
 ///

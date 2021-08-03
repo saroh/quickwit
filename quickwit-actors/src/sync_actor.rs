@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::actor::MessageProcessError;
 use crate::actor_handle::ActorTermination;
-use crate::mailbox::{Capacity, Command, Inbox, create_mailbox};
+use crate::mailbox::{create_mailbox, Capacity, Command, Inbox};
 use crate::{Actor, ActorHandle, Context, KillSwitch, Mailbox, Progress, ReceptionResult};
 
 /// An sync actor is executed on a tokio blocking task.
@@ -37,8 +37,7 @@ pub trait SyncActor: Actor + Sized {
         kill_switch: KillSwitch,
     ) -> ActorHandle<Self::Message, Self::ObservableState> {
         let actor_name = self.name();
-        let (mailbox, inbox) =
-            create_mailbox(actor_name, message_queue_capacity,);
+        let (mailbox, inbox) = create_mailbox(actor_name, message_queue_capacity);
         let (state_tx, state_rx) = watch::channel(self.observable_state());
         let progress = Progress::default();
         let progress_clone = progress.clone();
