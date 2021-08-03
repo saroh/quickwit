@@ -15,6 +15,8 @@ pub enum MessageProcessError {
     DownstreamClosed,
     #[error("Failure")]
     Error(#[from] anyhow::Error),
+    #[error("Terminated")]
+    Terminated
 }
 
 impl From<SendError> for MessageProcessError {

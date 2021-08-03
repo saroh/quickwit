@@ -195,26 +195,26 @@ impl<Message> Inbox<Message> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum Capacity {
+pub enum QueueCapacity {
     Bounded(usize),
     Unbounded,
 }
 
-impl Capacity {
+impl QueueCapacity {
     fn create_channel<M>(&self) -> (flume::Sender<M>, flume::Receiver<M>) {
         match *self {
-            Capacity::Bounded(cap) => flume::bounded(cap),
-            Capacity::Unbounded => flume::unbounded(),
+            QueueCapacity::Bounded(cap) => flume::bounded(cap),
+            QueueCapacity::Unbounded => flume::unbounded(),
         }
     }
 }
 
 pub fn create_mailbox<M: Send + Sync + Clone + fmt::Debug>(
     actor_name: String,
-    capacity: Capacity,
+    capacity: QueueCapacity,
 ) -> (Mailbox<M>, Inbox<M>) {
     let (msg_tx, msg_rx) = capacity.create_channel();
-    let (cmd_tx, cmd_rx) = Capacity::Unbounded.create_channel();
+    let (cmd_tx, cmd_rx) = QueueCapacity::Unbounded.create_channel();
     let mailbox = Mailbox {
         inner: Arc::new(Inner {
             sender: msg_tx,

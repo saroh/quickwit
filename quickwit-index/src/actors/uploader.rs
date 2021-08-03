@@ -18,4 +18,30 @@
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use quickwit_actors::Actor;
+use quickwit_actors::AsyncActor;
+use async_trait::async_trait;
+use crate::models::PackagedSplit;
+
 pub struct Uploader;
+
+impl Actor for Uploader {
+    type Message = PackagedSplit;
+
+    type ObservableState = ();
+
+    fn observable_state(&self) -> Self::ObservableState {
+        ()
+    }
+}
+
+#[async_trait]
+impl AsyncActor for Uploader {
+    async fn process_message(
+        &mut self,
+        message: Self::Message,
+        context: quickwit_actors::Context<'_, Self::Message>,
+    ) -> Result<(), quickwit_actors::MessageProcessError> {
+        Ok(())
+    }
+}

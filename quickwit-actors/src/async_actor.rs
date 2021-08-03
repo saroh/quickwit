@@ -1,6 +1,6 @@
 use crate::actor::MessageProcessError;
 use crate::actor_handle::{ActorHandle, ActorTermination};
-use crate::mailbox::{create_mailbox, Capacity, Command, Inbox};
+use crate::mailbox::{create_mailbox, QueueCapacity, Command, Inbox};
 use crate::Mailbox;
 use crate::{Actor, Context, KillSwitch, Progress, ReceptionResult};
 use async_trait::async_trait;
@@ -28,7 +28,7 @@ pub trait AsyncActor: Actor + Sized {
     #[doc(hidden)]
     fn spawn(
         self,
-        capacity: Capacity,
+        capacity: QueueCapacity,
         kill_switch: KillSwitch,
     ) -> ActorHandle<Self::Message, Self::ObservableState> {
         let (state_tx, state_rx) = watch::channel(self.observable_state());
@@ -112,6 +112,7 @@ async fn async_actor_loop<A: AsyncActor>(
                 match actor.process_message(msg, context).await {
                     Ok(()) => (),
                     Err(MessageProcessError::OnDemand) => return ActorTermination::OnDemand,
+                    Err(MessageProcessError::Terminated) => return ActorTermination::Disconnect,
                     Err(MessageProcessError::Error(err)) => {
                         kill_switch.kill();
                         return ActorTermination::ActorError(err);

@@ -18,12 +18,6 @@
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-mod doc_batch;
-mod packaged_split;
-mod uploaded_split;
-mod indexed_split;
 
-pub use doc_batch::DocBatch;
-pub use indexed_split::IndexedSplit;
-pub use packaged_split::PackagedSplit;
-pub use uploaded_split::UploadedSplit;
+#[derive(Clone, Debug)]
+pub struct PackagedSplit;

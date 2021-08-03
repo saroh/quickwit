@@ -4,7 +4,7 @@ use tracing::debug;
 
 use crate::actor::MessageProcessError;
 use crate::actor_handle::ActorTermination;
-use crate::mailbox::{create_mailbox, Capacity, Command, Inbox};
+use crate::mailbox::{create_mailbox, QueueCapacity, Command, Inbox};
 use crate::{Actor, ActorHandle, Context, KillSwitch, Mailbox, Progress, ReceptionResult};
 
 /// An sync actor is executed on a tokio blocking task.
@@ -33,7 +33,7 @@ pub trait SyncActor: Actor + Sized {
     #[doc(hidden)]
     fn spawn(
         mut self,
-        message_queue_capacity: Capacity,
+        message_queue_capacity: QueueCapacity,
         kill_switch: KillSwitch,
     ) -> ActorHandle<Self::Message, Self::ObservableState> {
         let actor_name = self.name();
@@ -126,6 +126,7 @@ fn sync_actor_loop<A: SyncActor>(
                 match actor.process_message(msg, context) {
                     Ok(()) => (),
                     Err(MessageProcessError::OnDemand) => return ActorTermination::OnDemand,
+                    Err(MessageProcessError::Terminated) => return ActorTermination::OnDemand,
                     Err(MessageProcessError::Error(err)) => {
                         kill_switch.kill();
                         return ActorTermination::ActorError(err);

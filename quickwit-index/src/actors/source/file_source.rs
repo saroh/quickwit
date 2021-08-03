@@ -1,4 +1,15 @@
+use std::io;
+use std::path::Path;
+
 use quickwit_actors::Actor;
+use quickwit_actors::AsyncActor;
+use quickwit_actors::Context;
+use quickwit_actors::MessageProcessError;
+use tokio::fs::File;
+use async_trait::async_trait;
+use tokio::io::AsyncBufReadExt;
+use tokio::io::BufReader;
+use anyhow::Context as AnyhowContext;
 
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
@@ -21,16 +32,62 @@ use quickwit_actors::Actor;
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 pub struct FileSource {
-    offset: u64,
-    line_no: u64,
+    file_position: FilePosition,
+    file: BufReader<File>
+}
+
+impl FileSource {
+    pub async fn new(path: &Path) -> io::Result<FileSource> {
+        let file= File::open(path).await?;
+        Ok(FileSource {
+            file_position: FilePosition::default(),
+            file: BufReader::new(file),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FilePosition {
+    num_bytes: u64,
+    line_num: u64,
 }
 
 impl Actor for FileSource {
     type Message = ();
 
-    type ObservableState = usize;
+    type ObservableState = FilePosition;
 
     fn observable_state(&self) -> Self::ObservableState {
-        unimplemented!()
+        self.file_position
+    }
+
+    fn default_message(&self) -> Option<Self::Message> {
+        Some(())
+    }
+}
+
+#[async_trait]
+impl AsyncActor for FileSource {
+    async fn process_message(
+        &mut self,
+        message: Self::Message,
+        context: Context<'_, Self::Message>,
+    ) -> Result<(), MessageProcessError> {
+        let mut line = String::new();
+        let num_bytes = self.file
+            .read_line(&mut line).await
+            .map_err(|io_err: io::Error| {
+                match io_err.kind() {
+                    io::ErrorKind::ConnectionAborted | io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof => {
+                        MessageProcessError::Terminated
+                    },
+                    _ => {
+                        MessageProcessError::Error(anyhow::anyhow!(io_err))
+                    }
+                }
+            })?;
+        self.file_position.num_bytes += num_bytes as u64;
+        self.file_position.line_num += 1u64;
+        Ok(())
     }
 }

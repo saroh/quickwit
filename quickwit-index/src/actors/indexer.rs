@@ -1,3 +1,8 @@
+use quickwit_actors::Actor;
+use quickwit_actors::SyncActor;
+
+use crate::models::DocBatch;
+
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
 //
@@ -19,3 +24,23 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 pub struct Indexer;
+
+impl Actor for Indexer {
+    type Message = DocBatch;
+
+    type ObservableState = ();
+
+    fn observable_state(&self) -> Self::ObservableState {
+        ()
+    }
+}
+
+impl SyncActor for Indexer {
+    fn process_message(
+        &mut self,
+        message: Self::Message,
+        context: quickwit_actors::Context<'_, Self::Message>,
+    ) -> Result<(), quickwit_actors::MessageProcessError> {
+        Ok(())
+    }
+}

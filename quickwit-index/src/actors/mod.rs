@@ -20,7 +20,7 @@
 
 mod indexer;
 mod publisher;
-mod source;
+pub mod source;
 mod uploader;
 
 pub use self::indexer::Indexer;
