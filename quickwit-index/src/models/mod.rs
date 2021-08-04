@@ -22,8 +22,12 @@ mod doc_batch;
 mod packaged_split;
 mod uploaded_split;
 mod indexed_split;
+mod checkpoint;
+mod raw_doc_batch;
 
 pub use doc_batch::DocBatch;
 pub use indexed_split::IndexedSplit;
 pub use packaged_split::PackagedSplit;
 pub use uploaded_split::UploadedSplit;
+pub use raw_doc_batch::RawDocBatch;
+pub use checkpoint::Checkpoint;

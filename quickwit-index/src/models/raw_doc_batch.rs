@@ -1,8 +1,4 @@
-use quickwit_actors::Actor;
-use quickwit_actors::SyncActor;
-
-use crate::models::DocBatch;
-use crate::models::RawDocBatch;
+use crate::models::Checkpoint;
 
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
@@ -24,24 +20,10 @@ use crate::models::RawDocBatch;
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-pub struct Indexer;
-
-impl Actor for Indexer {
-    type Message = RawDocBatch;
-
-    type ObservableState = ();
-
-    fn observable_state(&self) -> Self::ObservableState {
-        ()
-    }
+#[derive(Default, Debug, Clone)]
+pub struct RawDocBatch {
+    pub docs: Vec<String>,
+    pub checkpoint: Checkpoint,
 }
 
-impl SyncActor for Indexer {
-    fn process_message(
-        &mut self,
-        message: Self::Message,
-        context: quickwit_actors::Context<'_, Self::Message>,
-    ) -> Result<(), quickwit_actors::MessageProcessError> {
-        Ok(())
-    }
-}
+

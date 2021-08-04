@@ -9,12 +9,18 @@ use crate::{Mailbox, SendError};
 
 #[derive(Error, Debug)]
 pub enum MessageProcessError {
+    /// The actor was stopped upon reception of a Command.
     #[error("On Demand")]
     OnDemand,
+    /// The actor tried to send a message to a dowstream actor and failed.
+    /// The logic ruled that the actor should be killed.
     #[error("Downstream actor closed connection")]
     DownstreamClosed,
+    /// Some unexpected error happened.
     #[error("Failure")]
     Error(#[from] anyhow::Error),
+    /// The actor terminated, as it identified it reached a state where it
+    /// would not send any more message.
     #[error("Terminated")]
     Terminated
 }

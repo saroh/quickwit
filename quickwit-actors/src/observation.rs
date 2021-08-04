@@ -12,6 +12,7 @@ pub enum Observation<ObservableState: fmt::Debug> {
     Timeout(ObservableState),
 }
 
+
 impl<ObservableState: fmt::Debug> Observation<ObservableState> {
     pub fn state(&self) -> &ObservableState {
         match self {

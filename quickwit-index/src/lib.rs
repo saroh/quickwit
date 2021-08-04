@@ -10,6 +10,7 @@ use crate::actors::Indexer;
 use crate::actors::Publisher;
 use crate::actors::Uploader;
 use crate::actors::source::FileSource;
+use crate::models::RawDocBatch;
 
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
@@ -42,7 +43,7 @@ async fn run_indexing() -> anyhow::Result<()> {
     let uploader_handler = uploader.spawn(QueueCapacity::Bounded(3), kill_switch.clone());
     let indexer = Indexer;
     let indexer_handler = indexer.spawn(QueueCapacity::Bounded(10), kill_switch.clone());
-    let source = FileSource::new(Path::new("data/test_corpus.json")).await?;
+    let source = FileSource::new(Path::new("data/test_corpus.json"), indexer_handler.mailbox().clone()).await?;
     let source = source.spawn(QueueCapacity::Bounded(1), kill_switch.clone());
     Ok(())
 }

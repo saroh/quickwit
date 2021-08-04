@@ -37,9 +37,9 @@ mod sync_actor;
 mod tests;
 
 pub use self::actor::Context;
-pub use self::mailbox::{Mailbox, QueueCapacity, ReceptionResult};
+pub use self::mailbox::{Mailbox, QueueCapacity, ReceptionResult, create_mailbox, create_test_mailbox};
 pub use actor::{Actor, KillSwitch, MessageProcessError, Progress};
-pub use actor_handle::ActorHandle;
+pub use actor_handle::{ActorHandle, ActorTermination};
 pub use async_actor::AsyncActor;
 pub use observation::Observation;
 pub use sync_actor::SyncActor;

@@ -21,12 +21,14 @@
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
+use std::time::Duration;
 
 use flume::RecvTimeoutError;
 use std::hash::Hash;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
+use crate::SendError;
 use crate::actor_handle::ActorMessage;
 
 #[derive(Clone)]
@@ -91,8 +93,6 @@ impl<Message> PartialEq for Mailbox<Message> {
     }
 }
 
-pub struct SendError;
-
 impl<Message> Eq for Mailbox<Message> {}
 
 impl<Message> Mailbox<Message> {
@@ -139,7 +139,7 @@ impl<Message> Mailbox<Message> {
 }
 
 pub struct Inbox<Message> {
-    rx: flume::Receiver<ActorMessage<Message>>,
+    pub rx: flume::Receiver<ActorMessage<Message>>,
     command_rx: flume::Receiver<Command>,
 }
 
@@ -151,11 +151,11 @@ pub enum ReceptionResult<M> {
     Disconnect,
 }
 
-impl<Message> Inbox<Message> {
-    fn get_command_if_available(&self) -> Option<ReceptionResult<Message>> {
+impl<Message: fmt::Debug> Inbox<Message> {
+    fn get_command_if_available(&self) -> Option<Command> {
         match self.command_rx.try_recv() {
-            Ok(command) => Some(ReceptionResult::Command(command)),
-            Err(flume::TryRecvError::Disconnected) => Some(ReceptionResult::Disconnect),
+            Ok(command) => Some(command),
+            Err(flume::TryRecvError::Disconnected) => None,
             Err(flume::TryRecvError::Empty) => None,
         }
     }
@@ -163,7 +163,7 @@ impl<Message> Inbox<Message> {
     pub async fn try_recv_msg_async(&self, message_enabled: bool) -> ReceptionResult<Message> {
         if let Some(command) = self.get_command_if_available() {
             tokio::task::yield_now().await;
-            return command;
+            return ReceptionResult::Command(command);
         }
         if !message_enabled {
             tokio::task::yield_now().await;
@@ -179,7 +179,7 @@ impl<Message> Inbox<Message> {
 
     pub fn try_recv_msg(&self, message_enabled: bool) -> ReceptionResult<Message> {
         if let Some(command) = self.get_command_if_available() {
-            return command;
+            return ReceptionResult::Command(command);
         }
         if !message_enabled {
             return ReceptionResult::None;
@@ -191,6 +191,23 @@ impl<Message> Inbox<Message> {
             Err(RecvTimeoutError::Disconnected) => ReceptionResult::Disconnect,
             Err(RecvTimeoutError::Timeout) => ReceptionResult::None,
         }
+    }
+
+    /// Destroys the inbox and returns the list of pending messages.
+    /// Commands are ignored.
+    ///
+    /// Warning this iterator might never be exhausted if there is a living
+    /// mailbox associated to it.
+    pub fn to_vec_for_test(self) -> Vec<Message> {
+        let mut messages = Vec::new();
+        loop {
+            match self.rx.try_recv() {
+                Ok(ActorMessage::Message(msg)) => { messages.push(msg) } ,
+                Ok(ActorMessage::Observe(_)) => { } ,
+                Err(_) => {break;},
+            }
+        }
+        messages
     }
 }
 
@@ -209,7 +226,7 @@ impl QueueCapacity {
     }
 }
 
-pub fn create_mailbox<M: Send + Sync + Clone + fmt::Debug>(
+pub fn create_mailbox<M>(
     actor_name: String,
     capacity: QueueCapacity,
 ) -> (Mailbox<M>, Inbox<M>) {
@@ -228,4 +245,8 @@ pub fn create_mailbox<M: Send + Sync + Clone + fmt::Debug>(
         command_rx: cmd_rx,
     };
     (mailbox, inbox)
+}
+
+pub fn create_test_mailbox<M>() -> (Mailbox<M>, Inbox<M>) {
+    create_mailbox("test-mailbox".to_string(), QueueCapacity::Unbounded)
 }

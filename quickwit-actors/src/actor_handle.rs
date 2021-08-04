@@ -1,7 +1,6 @@
 use std::fmt;
-use std::sync::Arc;
 use tokio::sync::{oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinError, JoinHandle};
 use tokio::time::timeout;
 use tracing::error;
 
@@ -17,21 +16,16 @@ use crate::{KillSwitch, Mailbox, Observation, Progress};
 /// Because `ActorHandle`'s generic types are Message and Observable, as opposed
 /// to the actor type, `ActorHandle` are interchangeable.
 /// It makes it possible to plug different implementations, have actor proxy etc.
-pub struct ActorHandle<M, ObservableState> {
-    inner: Arc<InnerActorHandle<M, ObservableState>>,
+pub struct ActorHandle<Message, ObservableState> {
+    mailbox: Mailbox<Message>,
+    join_handle: JoinHandle<ActorTermination>,
+    kill_switch: KillSwitch,
+    last_state: watch::Receiver<ObservableState>,
 }
 
 impl<M, ObservableState> fmt::Debug for ActorHandle<M, ObservableState> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ActorHandle({})", self.inner.mailbox.actor_name())
-    }
-}
-
-impl<Message, ObservableState> Clone for ActorHandle<Message, ObservableState> {
-    fn clone(&self) -> Self {
-        ActorHandle {
-            inner: self.inner.clone(),
-        }
+        write!(f, "ActorHandle({})", self.mailbox.actor_name())
     }
 }
 
@@ -57,17 +51,15 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
             }
         });
         ActorHandle {
-            inner: Arc::new(InnerActorHandle {
                 mailbox,
                 join_handle,
                 kill_switch: kill_switch_clone,
                 last_state,
-            }),
         }
     }
 
     pub fn mailbox(&self) -> &Mailbox<Message> {
-        &self.inner.as_ref().mailbox
+        &self.mailbox
     }
 
     /// Process all of the pending message, and returns a snapshot of
@@ -83,7 +75,6 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
     pub async fn process_and_observe(&self) -> Observation<ObservableState> {
         let (tx, rx) = oneshot::channel();
         if self
-            .inner
             .mailbox
             .send_actor_message(ActorMessage::Observe(tx))
             .await
@@ -92,15 +83,15 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
             error!("Failed to send message");
         }
         let observable_state_or_timeout = timeout(crate::HEARTBEAT, rx).await;
-        let state = self.inner.last_state.borrow().clone();
+        let state = self.last_state.borrow().clone();
         match observable_state_or_timeout {
             Ok(Ok(())) => Observation::Running(state),
             Ok(Err(_)) => Observation::Terminated(state),
             Err(_) => {
-                if self.inner.kill_switch.is_alive() {
+                if self.kill_switch.is_alive() {
                     Observation::Timeout(state)
                 } else {
-                    self.inner.join_handle.abort();
+                    self.join_handle.abort();
                     Observation::Terminated(state)
                 }
             }
@@ -114,6 +105,10 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
         let _ = rx.await;
     }
 
+    pub async fn join(self) -> Result<ActorTermination, JoinError> {
+        self.join_handle.await
+    }
+
     /// Observe the current state.
     ///
     /// If a message is currently being processed, the observation will be
@@ -121,7 +116,6 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
     pub async fn observe(&self) -> Observation<ObservableState> {
         let (tx, rx) = oneshot::channel();
         if self
-            .inner
             .mailbox
             .send_command(Command::Observe(tx))
             .await
@@ -130,15 +124,15 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
             error!("Failed to send message");
         }
         let observable_state_or_timeout = timeout(crate::HEARTBEAT, rx).await;
-        let state = self.inner.last_state.borrow().clone();
+        let state = self.last_state.borrow().clone();
         match observable_state_or_timeout {
             Ok(Ok(())) => Observation::Running(state),
             Ok(Err(_)) => Observation::Terminated(state),
             Err(_) => {
-                if self.inner.kill_switch.is_alive() {
+                if self.kill_switch.is_alive() {
                     Observation::Timeout(state)
                 } else {
-                    self.inner.join_handle.abort();
+                    self.join_handle.abort();
                     Observation::Terminated(state)
                 }
             }
@@ -146,18 +140,14 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
     }
 
     pub fn last_observation(&self) -> ObservableState {
-        self.inner.last_state.borrow().clone()
+        self.last_state.borrow().clone()
     }
 }
 
-struct InnerActorHandle<Message, ObservableState> {
-    mailbox: Mailbox<Message>,
-    join_handle: JoinHandle<ActorTermination>,
-    kill_switch: KillSwitch,
-    last_state: watch::Receiver<ObservableState>,
-}
+
 
 /// Represents the cause of termination of an actor.
+#[derive(Debug)]
 pub enum ActorTermination {
     /// Process command returned false.
     OnDemand,
@@ -171,7 +161,7 @@ pub enum ActorTermination {
     DownstreamClosed,
 }
 
-pub(crate) enum ActorMessage<Message> {
+pub enum ActorMessage<Message> {
     Message(Message),
     Observe(oneshot::Sender<()>),
 }
