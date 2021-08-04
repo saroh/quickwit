@@ -1,3 +1,10 @@
+use quickwit_actors::Actor;
+use quickwit_actors::Mailbox;
+use quickwit_actors::SyncActor;
+
+use crate::models::IndexedSplit;
+use crate::models::PackagedSplit;
+
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
 //
@@ -18,5 +25,26 @@
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#[derive(Debug, Clone)]
-pub struct DocBatch {}
+pub struct Packager {
+    sink: Mailbox<PackagedSplit>,
+}
+
+impl Actor for Packager {
+    type Message = IndexedSplit;
+
+    type ObservableState = ();
+
+    fn observable_state(&self) -> Self::ObservableState {
+        ()
+    }
+}
+
+impl SyncActor for Packager {
+    fn process_message(
+        &mut self,
+        split: IndexedSplit,
+        context: quickwit_actors::ActorContext<'_, Self::Message>,
+    ) -> Result<(), quickwit_actors::MessageProcessError> {
+        todo!()
+    }
+}

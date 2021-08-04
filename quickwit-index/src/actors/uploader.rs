@@ -40,7 +40,7 @@ impl AsyncActor for Uploader {
     async fn process_message(
         &mut self,
         message: Self::Message,
-        context: quickwit_actors::Context<'_, Self::Message>,
+        context: quickwit_actors::ActorContext<'_, Self::Message>,
     ) -> Result<(), quickwit_actors::MessageProcessError> {
         Ok(())
     }

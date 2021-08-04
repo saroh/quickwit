@@ -1,17 +1,3 @@
-use std::path::Path;
-
-use quickwit_actors::AsyncActor;
-use quickwit_actors::KillSwitch;
-use quickwit_actors::QueueCapacity;
-use quickwit_actors::SyncActor;
-use tantivy::IndexReaderBuilder;
-
-use crate::actors::Indexer;
-use crate::actors::Publisher;
-use crate::actors::Uploader;
-use crate::actors::source::FileSource;
-use crate::models::RawDocBatch;
-
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
 //
@@ -32,18 +18,35 @@ use crate::models::RawDocBatch;
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-mod actors;
-mod models;
+use std::path::Path;
+use std::time::Duration;
 
-async fn run_indexing() -> anyhow::Result<()> {
+use quickwit_actors::AsyncActor;
+use quickwit_actors::KillSwitch;
+use quickwit_actors::QueueCapacity;
+use quickwit_actors::SyncActor;
+use tantivy::IndexReaderBuilder;
+
+use crate::actors::Indexer;
+use crate::actors::Publisher;
+use crate::actors::Uploader;
+use crate::actors::source::FileSource;
+use crate::models::RawDocBatch;
+
+pub mod actors;
+pub mod models;
+
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub async fn run_indexing() -> anyhow::Result<()> {
     let kill_switch = KillSwitch::default();
     let publisher = Publisher;
     let publisher_handler = publisher.spawn(QueueCapacity::Bounded(3), kill_switch.clone());
     let uploader = Uploader;
     let uploader_handler = uploader.spawn(QueueCapacity::Bounded(3), kill_switch.clone());
-    let indexer = Indexer;
+    let indexer = Indexer::try_new(COMMIT_TIMEOUT)?;
     let indexer_handler = indexer.spawn(QueueCapacity::Bounded(10), kill_switch.clone());
-    let source = FileSource::new(Path::new("data/test_corpus.json"), indexer_handler.mailbox().clone()).await?;
+    let source = FileSource::try_new(Path::new("data/test_corpus.json"), indexer_handler.mailbox().clone()).await?;
     let source = source.spawn(QueueCapacity::Bounded(1), kill_switch.clone());
     Ok(())
 }

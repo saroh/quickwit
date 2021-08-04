@@ -4,8 +4,8 @@ use tracing::debug;
 
 use crate::actor::MessageProcessError;
 use crate::actor_handle::ActorTermination;
-use crate::mailbox::{create_mailbox, QueueCapacity, Command, Inbox};
-use crate::{Actor, ActorHandle, Context, KillSwitch, Mailbox, Progress, ReceptionResult};
+use crate::mailbox::{create_mailbox, Command, Inbox, QueueCapacity};
+use crate::{Actor, ActorHandle, ActorContext, KillSwitch, Mailbox, Progress, ReceptionResult};
 
 /// An sync actor is executed on a tokio blocking task.
 ///
@@ -22,7 +22,7 @@ pub trait SyncActor: Actor + Sized {
     fn process_message(
         &mut self,
         message: Self::Message,
-        context: crate::Context<'_, Self::Message>,
+        context: crate::ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError>;
 
     /// Function called if there are no more messages available.
@@ -83,7 +83,14 @@ fn sync_actor_loop<A: SyncActor>(
             return ActorTermination::KillSwitch;
         }
         progress.record_progress();
-        let mut reception_result = inbox.try_recv_msg(running);
+        let default_message_opt_ref = default_message_opt.as_ref().and_then(|default_message| {
+            if self_mailbox.is_last_mailbox() {
+                None
+            } else {
+                Some(default_message)
+            }
+        });
+        let reception_result = inbox.try_recv_msg(running, default_message_opt_ref);
         progress.record_progress();
         if !kill_switch.is_alive() {
             return ActorTermination::KillSwitch;
@@ -91,9 +98,6 @@ fn sync_actor_loop<A: SyncActor>(
         if let ReceptionResult::None = reception_result {
             if self_mailbox.is_last_mailbox() {
                 return ActorTermination::Disconnect;
-            }
-            if let Some(default_message) = default_message_opt.as_ref() {
-                reception_result = ReceptionResult::Message(default_message.clone());
             }
         }
         match reception_result {
@@ -119,7 +123,7 @@ fn sync_actor_loop<A: SyncActor>(
                 }
             }
             ReceptionResult::Message(msg) => {
-                let context = Context {
+                let context = ActorContext {
                     self_mailbox: &self_mailbox,
                     progress: &progress,
                 };

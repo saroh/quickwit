@@ -36,8 +36,10 @@ mod sync_actor;
 #[cfg(test)]
 mod tests;
 
-pub use self::actor::Context;
-pub use self::mailbox::{Mailbox, QueueCapacity, ReceptionResult, create_mailbox, create_test_mailbox};
+pub use self::actor::ActorContext;
+pub use self::mailbox::{
+    create_mailbox, create_test_mailbox, Mailbox, QueueCapacity, ReceptionResult,
+};
 pub use actor::{Actor, KillSwitch, MessageProcessError, Progress};
 pub use actor_handle::{ActorHandle, ActorTermination};
 pub use async_actor::AsyncActor;

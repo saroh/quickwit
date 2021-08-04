@@ -21,15 +21,15 @@
 use std::fmt;
 use std::ops::Deref;
 use std::sync::Arc;
-use std::time::Duration;
 
 use flume::RecvTimeoutError;
+use flume::TryRecvError;
 use std::hash::Hash;
 use tokio::sync::oneshot;
 use uuid::Uuid;
 
-use crate::SendError;
 use crate::actor_handle::ActorMessage;
+use crate::SendError;
 
 #[derive(Clone)]
 pub struct Mailbox<M> {
@@ -151,45 +151,69 @@ pub enum ReceptionResult<M> {
     Disconnect,
 }
 
-impl<Message: fmt::Debug> Inbox<Message> {
+impl<Message: fmt::Debug + Clone> Inbox<Message> {
     fn get_command_if_available(&self) -> Option<Command> {
         match self.command_rx.try_recv() {
             Ok(command) => Some(command),
-            Err(flume::TryRecvError::Disconnected) => None,
-            Err(flume::TryRecvError::Empty) => None,
+            Err(TryRecvError::Disconnected) => None,
+            Err(TryRecvError::Empty) => None,
         }
     }
 
-    pub async fn try_recv_msg_async(&self, message_enabled: bool) -> ReceptionResult<Message> {
-        if let Some(command) = self.get_command_if_available() {
-            tokio::task::yield_now().await;
-            return ReceptionResult::Command(command);
-        }
-        if !message_enabled {
-            tokio::task::yield_now().await;
-            return ReceptionResult::None;
-        }
-        match tokio::time::timeout(crate::message_timeout(), self.rx.recv_async()).await {
-            Ok(Ok(ActorMessage::Message(msg))) => ReceptionResult::Message(msg),
-            Ok(Ok(ActorMessage::Observe(cb))) => ReceptionResult::Command(Command::Observe(cb)),
-            Ok(Err(_recv_error)) => ReceptionResult::Disconnect,
-            Err(_timeout_error) => ReceptionResult::None,
-        }
-    }
-
-    pub fn try_recv_msg(&self, message_enabled: bool) -> ReceptionResult<Message> {
+    pub async fn try_recv_msg_async(
+        &self,
+        message_enabled: bool,
+        default_message_opt_ref: Option<&Message>,
+    ) -> ReceptionResult<Message> {
         if let Some(command) = self.get_command_if_available() {
             return ReceptionResult::Command(command);
         }
         if !message_enabled {
             return ReceptionResult::None;
         }
-        let msg = self.rx.recv_timeout(crate::message_timeout());
-        match msg {
-            Ok(ActorMessage::Message(msg)) => ReceptionResult::Message(msg),
-            Ok(ActorMessage::Observe(cb)) => ReceptionResult::Command(Command::Observe(cb)),
-            Err(RecvTimeoutError::Disconnected) => ReceptionResult::Disconnect,
-            Err(RecvTimeoutError::Timeout) => ReceptionResult::None,
+        if let Some(default_message) = default_message_opt_ref {
+            match self.rx.try_recv() {
+                Ok(ActorMessage::Message(msg)) => ReceptionResult::Message(msg),
+                Ok(ActorMessage::Observe(cb)) => ReceptionResult::Command(Command::Observe(cb)),
+                Err(TryRecvError::Empty) => ReceptionResult::Message(default_message.clone()),
+                Err(TryRecvError::Disconnected) => ReceptionResult::Disconnect,
+            }
+        } else {
+            match tokio::time::timeout(crate::message_timeout(), self.rx.recv_async()).await {
+                Ok(Ok(ActorMessage::Message(msg))) => ReceptionResult::Message(msg),
+                Ok(Ok(ActorMessage::Observe(cb))) => ReceptionResult::Command(Command::Observe(cb)),
+                Ok(Err(_recv_error)) => ReceptionResult::Disconnect,
+                Err(_timeout_error) => ReceptionResult::None,
+            }
+        }
+    }
+
+    pub fn try_recv_msg(
+        &self,
+        message_enabled: bool,
+        default_message_opt_ref: Option<&Message>,
+    ) -> ReceptionResult<Message> {
+        if let Some(command) = self.get_command_if_available() {
+            return ReceptionResult::Command(command);
+        }
+        if !message_enabled {
+            return ReceptionResult::None;
+        }
+        if let Some(default_message) = default_message_opt_ref {
+            match self.rx.try_recv() {
+                Ok(ActorMessage::Message(msg)) => ReceptionResult::Message(msg),
+                Ok(ActorMessage::Observe(cb)) => ReceptionResult::Command(Command::Observe(cb)),
+                Err(TryRecvError::Empty) => ReceptionResult::Message(default_message.clone()),
+                Err(TryRecvError::Disconnected) => ReceptionResult::Disconnect,
+            }
+        } else {
+            let msg = self.rx.recv_timeout(crate::message_timeout());
+            match msg {
+                Ok(ActorMessage::Message(msg)) => ReceptionResult::Message(msg),
+                Ok(ActorMessage::Observe(cb)) => ReceptionResult::Command(Command::Observe(cb)),
+                Err(RecvTimeoutError::Disconnected) => ReceptionResult::Disconnect,
+                Err(RecvTimeoutError::Timeout) => ReceptionResult::None,
+            }
         }
     }
 
@@ -202,9 +226,11 @@ impl<Message: fmt::Debug> Inbox<Message> {
         let mut messages = Vec::new();
         loop {
             match self.rx.try_recv() {
-                Ok(ActorMessage::Message(msg)) => { messages.push(msg) } ,
-                Ok(ActorMessage::Observe(_)) => { } ,
-                Err(_) => {break;},
+                Ok(ActorMessage::Message(msg)) => messages.push(msg),
+                Ok(ActorMessage::Observe(_)) => {}
+                Err(_) => {
+                    break;
+                }
             }
         }
         messages
@@ -226,10 +252,7 @@ impl QueueCapacity {
     }
 }
 
-pub fn create_mailbox<M>(
-    actor_name: String,
-    capacity: QueueCapacity,
-) -> (Mailbox<M>, Inbox<M>) {
+pub fn create_mailbox<M>(actor_name: String, capacity: QueueCapacity) -> (Mailbox<M>, Inbox<M>) {
     let (msg_tx, msg_rx) = capacity.create_channel();
     let (cmd_tx, cmd_rx) = QueueCapacity::Unbounded.create_channel();
     let mailbox = Mailbox {

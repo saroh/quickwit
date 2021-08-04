@@ -19,5 +19,6 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 mod file_source;
+mod vec_source;
 
 pub use file_source::FileSource;

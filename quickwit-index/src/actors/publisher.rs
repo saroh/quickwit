@@ -19,14 +19,16 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use quickwit_actors::Actor;
+use quickwit_actors::ActorContext;
 use quickwit_actors::AsyncActor;
 use async_trait::async_trait;
 use crate::models::PackagedSplit;
+use crate::models::UploadedSplit;
 
 pub struct Publisher;
 
 impl Actor for Publisher {
-    type Message = PackagedSplit;
+    type Message = UploadedSplit;
     type ObservableState = ();
 
     fn observable_state(&self) -> Self::ObservableState {
@@ -38,8 +40,8 @@ impl Actor for Publisher {
 impl AsyncActor for Publisher {
     async fn process_message(
         &mut self,
-        message: Self::Message,
-        context: quickwit_actors::Context<'_, Self::Message>,
+        message: UploadedSplit,
+        context: ActorContext<'_, Self::Message>,
     ) -> Result<(), quickwit_actors::MessageProcessError> {
         println!("publishing");
         Ok(())

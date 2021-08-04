@@ -22,7 +22,7 @@ pub enum MessageProcessError {
     /// The actor terminated, as it identified it reached a state where it
     /// would not send any more message.
     #[error("Terminated")]
-    Terminated
+    Terminated,
 }
 
 impl From<SendError> for MessageProcessError {
@@ -112,12 +112,12 @@ impl KillSwitch {
         self.alive.load(Ordering::Relaxed)
     }
 }
-pub struct Context<'a, Message> {
+pub struct ActorContext<'a, Message> {
     pub self_mailbox: &'a Mailbox<Message>,
     pub progress: &'a Progress,
 }
 
-impl<'a, Message> Context<'a, Message> {
+impl<'a, Message> ActorContext<'a, Message> {
     pub async fn self_send_async(&self, msg: Message) {
         if let Err(_send_err) = self.self_mailbox.send_async(msg).await {
             error!("Failed to send error to self. This should never happen.");

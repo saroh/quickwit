@@ -23,7 +23,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use quickwit_actors::Actor;
 use quickwit_actors::AsyncActor;
-use quickwit_actors::Context;
+use quickwit_actors::ActorContext;
 use quickwit_actors::Mailbox;
 use quickwit_actors::MessageProcessError;
 use tokio::fs::File;
@@ -61,7 +61,7 @@ impl Actor for FileSource {
     }
 }
 impl FileSource {
-    pub async fn new(path: &Path, sink: Mailbox<RawDocBatch>) -> io::Result<FileSource> {
+    pub async fn try_new(path: &Path, sink: Mailbox<RawDocBatch>) -> io::Result<FileSource> {
         let file = File::open(path).await?;
         Ok(FileSource {
             file_position: FilePosition::default(),
@@ -76,7 +76,7 @@ impl AsyncActor for FileSource {
     async fn process_message(
         &mut self,
         _message: Self::Message,
-        _context: Context<'_, Self::Message>,
+        _context: ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         let limit_num_bytes = self.file_position.num_bytes + BATCH_NUM_BYTES_THRESHOLD;
         let mut reached_eof = false;
@@ -108,12 +108,9 @@ impl AsyncActor for FileSource {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use quickwit_actors::KillSwitch;
     use quickwit_actors::QueueCapacity;
     use quickwit_actors::create_test_mailbox;
-    use tokio::time;
 
     use super::*;
     use quickwit_actors::ActorTermination;
@@ -121,7 +118,7 @@ mod tests {
     #[tokio::test]
     async fn test_file_source() -> anyhow::Result<()> {
         let (mailbox, inbox)= create_test_mailbox();
-        let file_source = FileSource::new(Path::new("data/test_corpus.json"), mailbox).await?;
+        let file_source = FileSource::try_new(Path::new("data/test_corpus.json"), mailbox).await?;
         let file_source_handle = file_source.spawn(QueueCapacity::Unbounded, KillSwitch::default());
         let actor_termination = file_source_handle.join().await?;
         assert!(matches!(actor_termination, ActorTermination::Disconnect));

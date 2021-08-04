@@ -51,10 +51,10 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
             }
         });
         ActorHandle {
-                mailbox,
-                join_handle,
-                kill_switch: kill_switch_clone,
-                last_state,
+            mailbox,
+            join_handle,
+            kill_switch: kill_switch_clone,
+            last_state,
         }
     }
 
@@ -65,13 +65,10 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
     /// Process all of the pending message, and returns a snapshot of
     /// the observable state of the actor after this.
     ///
-    /// This method is mostly useful in tests.
+    /// This method is mostly useful for tests.
     ///
-    /// Because the observation requires to wait for the mailbox to be empty,
-    /// observation, it may timeout.
-    ///
-    /// In that case, [Observation::Timeout] is returned with the last
-    /// observed state.
+    /// To actually observe the state of an actor for ops purpose,
+    /// prefer using the `.observe()` method.
     pub async fn process_and_observe(&self) -> Observation<ObservableState> {
         let (tx, rx) = oneshot::channel();
         if self
@@ -82,19 +79,11 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
         {
             error!("Failed to send message");
         }
-        let observable_state_or_timeout = timeout(crate::HEARTBEAT, rx).await;
+        let observable_state = rx.await;
         let state = self.last_state.borrow().clone();
-        match observable_state_or_timeout {
-            Ok(Ok(())) => Observation::Running(state),
-            Ok(Err(_)) => Observation::Terminated(state),
-            Err(_) => {
-                if self.kill_switch.is_alive() {
-                    Observation::Timeout(state)
-                } else {
-                    self.join_handle.abort();
-                    Observation::Terminated(state)
-                }
-            }
+        match observable_state {
+            Ok(()) => Observation::Running(state),
+            Err(_) => Observation::Terminated(state),
         }
     }
 
@@ -143,8 +132,6 @@ impl<Message, ObservableState: Clone + Send + fmt::Debug> ActorHandle<Message, O
         self.last_state.borrow().clone()
     }
 }
-
-
 
 /// Represents the cause of termination of an actor.
 #[derive(Debug)]

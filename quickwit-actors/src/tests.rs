@@ -1,6 +1,6 @@
 use crate::actor::{Actor, KillSwitch};
-use crate::mailbox::{QueueCapacity, Command};
-use crate::{AsyncActor, Context, Mailbox, MessageProcessError, Observation, SyncActor};
+use crate::mailbox::{Command, QueueCapacity};
+use crate::{AsyncActor, ActorContext, Mailbox, MessageProcessError, Observation, SyncActor};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -36,7 +36,7 @@ impl SyncActor for PingReceiverSyncActor {
     fn process_message(
         &mut self,
         _message: Self::Message,
-        _progress: Context<'_, Self::Message>,
+        _progress: ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         self.ping_count += 1;
         Ok(())
@@ -72,7 +72,7 @@ impl AsyncActor for PingReceiverAsyncActor {
     async fn process_message(
         &mut self,
         _message: Self::Message,
-        _progress: Context<'_, Self::Message>,
+        _progress: ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         self.ping_count += 1;
         Ok(())
@@ -121,7 +121,7 @@ impl AsyncActor for PingerAsyncSenderActor {
     async fn process_message(
         &mut self,
         message: SenderMessage,
-        _context: Context<'_, SenderMessage>,
+        _context: ActorContext<'_, SenderMessage>,
     ) -> Result<(), MessageProcessError> {
         match message {
             SenderMessage::AddPeer(peer) => {
@@ -231,7 +231,7 @@ impl AsyncActor for BuggyActor {
     async fn process_message(
         &mut self,
         message: BuggyMessage,
-        _progress: Context<'_, BuggyMessage>,
+        _progress: ActorContext<'_, BuggyMessage>,
     ) -> Result<(), MessageProcessError> {
         match message {
             BuggyMessage::Block => {
@@ -348,7 +348,7 @@ impl AsyncActor for DefaultMessageActor {
     async fn process_message(
         &mut self,
         message: Self::Message,
-        _ctx: Context<'_, Self::Message>,
+        _ctx: ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         match message {
             Msg::Default => {
@@ -366,7 +366,7 @@ impl SyncActor for DefaultMessageActor {
     fn process_message(
         &mut self,
         message: Self::Message,
-        _ctx: Context<'_, Self::Message>,
+        _ctx: ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         match message {
             Msg::Default => {
