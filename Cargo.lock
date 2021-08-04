@@ -2758,6 +2758,8 @@ dependencies = [
  "futures",
  "once_cell",
  "quickwit-actors",
+ "quickwit-index-config",
+ "quickwit-metastore",
  "quickwit-storage",
  "tantivy",
  "tokio",
