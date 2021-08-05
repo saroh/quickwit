@@ -1,3 +1,6 @@
+use tempfile::TempDir;
+use ulid::Ulid;
+
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
 //
@@ -18,5 +21,8 @@
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#[derive(Clone, Debug)]
-pub struct PackagedSplit;
+#[derive(Debug)]
+pub struct PackagedSplit {
+    pub split_id: Ulid,
+    pub temp_dir: TempDir,
+}

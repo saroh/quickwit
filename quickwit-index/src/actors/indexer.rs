@@ -28,6 +28,7 @@ use std::time::Instant;
 use anyhow::Context;
 use quickwit_actors::Actor;
 use quickwit_actors::Mailbox;
+use quickwit_actors::SendError;
 use quickwit_actors::SyncActor;
 use quickwit_index_config::IndexConfig;
 use tantivy::IndexWriter;
@@ -95,7 +96,7 @@ impl SyncActor for Indexer {
                     index_writer.add_document(doc);
                 }
                 Err(doc_parsing_error) => {
-                    // TODO what should we do
+                    // TODO we should at least keep track of the number of parse error.
                     warn!(err=?doc_parsing_error);
                 }
             }
@@ -106,7 +107,7 @@ impl SyncActor for Indexer {
         if let Some(deadline) = self.next_commit_deadline_opt {
             let now = Instant::now();
             if now >= deadline {
-                self.commit()?;
+                self.send_to_packager()?;
             }
         } else {
             self.next_commit_deadline_opt = None;
@@ -159,7 +160,13 @@ impl Indexer {
         Ok(&mut current_index_split.index_writer)
     }
 
-    fn commit(&mut self) -> anyhow::Result<()> {
+    fn send_to_packager(&mut self) -> Result<(), SendError> {
+        let indexed_split = if let Some(indexed_split) = self.current_split_opt.take() {
+                indexed_split
+            } else {
+                return Ok(());
+            };
+        self.sink.send_blocking(indexed_split)?;
         Ok(())
     }
 }
