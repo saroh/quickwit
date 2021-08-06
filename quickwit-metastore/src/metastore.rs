@@ -46,7 +46,7 @@ pub struct IndexMetadata {
 }
 
 /// A split metadata carries all meta data about a split.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Default, Debug, Serialize, Deserialize)]
 pub struct SplitMetadata {
     /// Split ID. Joined with the index URI (<index URI>/<split ID>), this ID
     /// should be enough to uniquely identify a split.
@@ -62,6 +62,12 @@ pub struct SplitMetadata {
 
     /// Weight of the split in bytes.
     pub size_in_bytes: usize,
+
+    /// hotcache offset in the single file bundle.
+    /// This is used to read the hotcache and footer in a single read.
+    pub hotcache_offset: u64,
+    /// footer offset in the single file bundle.
+    pub bundle_footer_offset: u64,
 
     /// If a timestamp field is available, the min / max timestamp in the split.
     pub time_range: Option<Range<i64>>,
@@ -81,6 +87,8 @@ impl SplitMetadata {
             split_state: SplitState::New,
             num_records: 0,
             size_in_bytes: 0,
+            hotcache_offset: 0,
+            bundle_footer_offset: 0,
             time_range: None,
             generation: 0,
             update_timestamp: Utc::now().timestamp(),
@@ -102,6 +110,12 @@ pub enum SplitState {
 
     /// The split is scheduled for deletion.
     ScheduledForDeletion,
+}
+
+impl Default for SplitState {
+    fn default() -> Self {
+        Self::New
+    }
 }
 
 /// A MetadataSet carries an index metadata and its split metadata.
@@ -189,6 +203,25 @@ pub trait Metastore: Send + Sync + 'static {
         split_state: SplitState,
         time_range: Option<Range<i64>>,
     ) -> MetastoreResult<Vec<SplitMetadata>>;
+
+    /// Lists the splits.
+    /// Returns a list of splits that intersects the given `time_range`, `split_state` and
+    /// `split_ids`.
+    /// Regardless of the time range filter, if a split has no timestamp it is always returned.
+    /// An error will occur if an index that does not exist in the storage is specified.
+    async fn list_split_ids(
+        &self,
+        index_id: &str,
+        split_state: SplitState,
+        time_range: Option<Range<i64>>,
+        split_ids: &[String],
+    ) -> MetastoreResult<Vec<SplitMetadata>> {
+        let split_metadata = self.list_splits(index_id, split_state, time_range).await?;
+        Ok(split_metadata
+            .into_iter()
+            .filter(|meta| split_ids.contains(&meta.split_id))
+            .collect())
+    }
 
     /// Lists the splits without filtering.
     /// Returns a list of all splits currently known to the metastore regardless of their state.
