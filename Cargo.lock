@@ -2757,6 +2757,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "flume",
  "futures",
  "once_cell",
  "quickwit-actors",
@@ -2764,6 +2765,8 @@ dependencies = [
  "quickwit-index-config",
  "quickwit-metastore",
  "quickwit-storage",
+ "serde",
+ "serde_json",
  "tantivy",
  "tempfile",
  "tokio",

@@ -19,6 +19,7 @@
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 use std::fmt;
+use std::ops::RangeInclusive;
 use std::path::Path;
 
 use tantivy::merge_policy::NoMergePolicy;
@@ -30,6 +31,9 @@ const MEM_BUDGET_IN_BYTES: usize = 1_000_000_000;
 
 pub struct IndexedSplit {
     pub split_id: Ulid,
+    pub time_range: Option<RangeInclusive<i64>>,
+    pub size_in_bytes: u64,
+
     pub index: tantivy::Index,
     pub index_writer: tantivy::IndexWriter,
     pub temp_dir: TempDir,
@@ -47,10 +51,13 @@ impl IndexedSplit {
         let temp_dir = tempfile::tempdir_in(root_path)?;
         Ok(IndexedSplit {
             split_id: Ulid::new(),
+            time_range: None,
+            size_in_bytes: 0,
+
             index,
             index_writer,
-            temp_dir: temp_dir,
-        })
+            temp_dir,
+       })
     }
 }
 

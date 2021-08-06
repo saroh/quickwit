@@ -1,3 +1,6 @@
+use std::ops::RangeInclusive;
+
+use tantivy::SegmentMeta;
 use tempfile::TempDir;
 use ulid::Ulid;
 
@@ -23,6 +26,10 @@ use ulid::Ulid;
 
 #[derive(Debug)]
 pub struct PackagedSplit {
-    pub split_id: Ulid,
-    pub temp_dir: TempDir,
+    pub split_id: String,
+    pub time_range: Option<RangeInclusive<i64>>,
+    pub size_in_bytes: u64,
+    pub segment_meta: SegmentMeta,
+    pub split_scratch_dir: TempDir,
+    pub num_docs: u64,
 }

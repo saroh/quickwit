@@ -23,9 +23,11 @@ mod indexed_split;
 mod packaged_split;
 mod raw_doc_batch;
 mod uploaded_split;
+mod manifest;
 
 pub use checkpoint::Checkpoint;
 pub use indexed_split::IndexedSplit;
 pub use packaged_split::PackagedSplit;
 pub use raw_doc_batch::RawDocBatch;
 pub use uploaded_split::UploadedSplit;
+pub use manifest::{Manifest, ManifestEntry};

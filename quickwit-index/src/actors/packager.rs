@@ -62,22 +62,13 @@ fn is_merge_required(segment_metas: &[SegmentMeta]) -> bool {
     }
 }
 
-/// Merge all segments of the split into one.
+/// Commits the tantivy Index.
+/// Tantivy will serialize all of its remaining internal in RAM
+/// datastructure and write them on disk.
 ///
-/// If there is only one segment and it has no delete, avoid doing anything them.
-pub async fn merge_all_segments(split: &mut IndexedSplit) -> anyhow::Result<()> {
-    let segment_metas = split.index.searchable_segment_metas()?;
-    if !is_merge_required(&segment_metas[..]) {
-        return Ok(());
-    }
-    let segment_ids: Vec<SegmentId> = segment_metas
-        .into_iter()
-        .map(|segment_meta| segment_meta.id())
-        .collect();
-    split.index_writer.merge(&segment_ids).await?;
-    Ok(())
-}
-
+/// It consists in several sequentials phases mixing both
+/// CPU and IO, the longest once being the serialization of
+/// the inverted index. This phase is CPU bound.
 fn commit_split(split: &mut IndexedSplit) -> anyhow::Result<()> {
     split
         .index_writer
@@ -92,6 +83,10 @@ fn commit_split(split: &mut IndexedSplit) -> anyhow::Result<()> {
 /// which potentially olds a lot of RAM.
 fn merge_segments_in_split(mut split: IndexedSplit) -> anyhow::Result<PackagedSplit> {
     let segment_metas = split.index.searchable_segment_metas()?;
+    let num_docs: u64 = segment_metas
+        .iter()
+        .map(|segment_meta| segment_meta.num_docs() as u64)
+        .sum();
     if is_merge_required(&segment_metas[..]) {
         let segment_ids: Vec<SegmentId> = segment_metas
             .into_iter()
@@ -100,15 +95,23 @@ fn merge_segments_in_split(mut split: IndexedSplit) -> anyhow::Result<PackagedSp
         // TODO it would be nice if tantivy could let us run the merge in the current thread.
         futures::executor::block_on(split.index_writer.merge(&segment_ids))?;
     }
+    let segment_metas: Vec<SegmentMeta> = split.index.searchable_segment_metas()?;
+    if segment_metas.len() != 1 {
+        anyhow::bail!("Ended up with more than one segment despite successful merge. {:?}", split);
+    }
     let packaged_split = PackagedSplit {
-        split_id: split.split_id,
-        temp_dir: split.temp_dir,
+        split_id: split.split_id.to_string(),
+        split_scratch_dir: split.temp_dir,
+        num_docs,
+        segment_meta: segment_metas[0].clone(),
+        time_range: split.time_range.clone(),
+        size_in_bytes: split.size_in_bytes,
     };
     Ok(packaged_split)
 }
 
 fn build_hotcache(split: &PackagedSplit) -> anyhow::Result<()> {
-    let split_scratch_dir = split.temp_dir.path().to_path_buf();
+    let split_scratch_dir = split.split_scratch_dir.path().to_path_buf();
     let hotcache_path = split_scratch_dir.join(HOTCACHE_FILENAME);
     let mut hotcache_file = std::fs::File::create(&hotcache_path)?;
     let mmap_directory = tantivy::directory::MmapDirectory::open(split_scratch_dir)?;
