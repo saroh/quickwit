@@ -32,9 +32,8 @@ use quickwit_actors::Mailbox;
 use quickwit_actors::SendError;
 use quickwit_actors::SyncActor;
 use quickwit_index_config::IndexConfig;
-use tantivy::Document;
 use tantivy::schema::Field;
-use tantivy::IndexWriter;
+use tantivy::Document;
 use tracing::warn;
 
 use crate::models::IndexedSplit;
@@ -65,6 +64,7 @@ impl ScratchDirectory {
 }
 
 pub struct Indexer {
+    index_id: String,
     index_config: Arc<dyn IndexConfig>,
     // splits index writer will write in TempDir within this directory
     indexing_scratch_directory: ScratchDirectory,
@@ -86,7 +86,6 @@ impl Actor for Indexer {
     }
 }
 
-
 fn extract_timestamp(doc: &Document, timestamp_field_opt: Option<Field>) -> Option<i64> {
     let timestamp_field = timestamp_field_opt?;
     let timestamp_value = doc.get_first(timestamp_field)?;
@@ -105,24 +104,22 @@ impl SyncActor for Indexer {
         for doc_json in batch.docs {
             indexed_split.size_in_bytes += doc_json.len() as u64;
             let doc_parsing_result = index_config.doc_from_json(&doc_json);
-            let doc  =
-                match doc_parsing_result {
-                    Ok(doc) => doc,
-                    Err(doc_parsing_error) => {
-                        // TODO we should at least keep track of the number of parse error.
-                        warn!(err=?doc_parsing_error);
-                        continue;
-                    }
-                };
+            let doc = match doc_parsing_result {
+                Ok(doc) => doc,
+                Err(doc_parsing_error) => {
+                    // TODO we should at least keep track of the number of parse error.
+                    warn!(err=?doc_parsing_error);
+                    continue;
+                }
+            };
             if let Some(timestamp) = extract_timestamp(&doc, timestamp_field_opt) {
-                let new_timestamp_range =
-                    match indexed_split.time_range.as_ref() {
-                        Some(range) =>
-                            RangeInclusive::new(timestamp.min(*range.start()), timestamp.max(*range.end())),
-                        None =>
-                            RangeInclusive::new(timestamp, timestamp),
-
-                    };
+                let new_timestamp_range = match indexed_split.time_range.as_ref() {
+                    Some(range) => RangeInclusive::new(
+                        timestamp.min(*range.start()),
+                        timestamp.max(*range.end()),
+                    ),
+                    None => RangeInclusive::new(timestamp, timestamp),
+                };
                 indexed_split.time_range = Some(new_timestamp_range);
             }
             indexed_split.index_writer.add_document(doc);
@@ -147,6 +144,7 @@ impl Indexer {
     // TODO take all of the parameter and dispatch them in index config, or in a different
     // IndexerParams object.
     pub fn try_new(
+        index_id: String,
         index_config: Arc<dyn IndexConfig>,
         indexing_directory: Option<PathBuf>, //< if None, we create a tempdirectory.
         commit_timeout: Duration,
@@ -159,6 +157,7 @@ impl Indexer {
         };
         let time_field_opt = index_config.timestamp_field();
         Ok(Indexer {
+            index_id,
             index_config,
             commit_timeout,
             sink,
@@ -172,8 +171,11 @@ impl Indexer {
 
     fn create_indexed_split(&self) -> anyhow::Result<IndexedSplit> {
         let schema = self.index_config.schema();
-        let indexed_split =
-            IndexedSplit::new_in_dir(self.indexing_scratch_directory.path(), schema)?;
+        let indexed_split = IndexedSplit::new_in_dir(
+            self.index_id.clone(),
+            self.indexing_scratch_directory.path(),
+            schema,
+        )?;
         Ok(indexed_split)
     }
 

@@ -42,10 +42,9 @@ use quickwit_metastore::SplitMetadata;
 use quickwit_metastore::SplitState;
 use quickwit_storage::PutPayload;
 use quickwit_storage::Storage;
-use tantivy::SegmentId;
 use tantivy::chrono::Utc;
+use tantivy::SegmentId;
 use tracing::info;
-use tracing::warn;
 
 pub const MAX_CONCURRENT_SPLIT_UPLOAD: usize = 3;
 
@@ -193,14 +192,6 @@ async fn put_split_files_to_storage(
         vec![split.segment_meta.id()],
         split_metadata,
     );
-    /*{
-           split_metadata: (),
-           split_size_in_bytes,
-           num_files: manifest_entries.len() as u64,
-           files: manifest_entries,
-           segments: vec![split.segment_meta.id()],
-    };*/
-
     futures::future::try_join_all(upload_res_futures).await?;
 
     let manifest_body = manifest.to_json()?.into_bytes();
@@ -224,15 +215,41 @@ async fn put_split_files_to_storage(
     Ok(manifest)
 }
 
+fn create_split_metadata(split: &PackagedSplit) -> SplitMetadata {
+    SplitMetadata {
+        split_id: split.split_id.clone(),
+        num_records: split.num_docs as usize,
+        time_range: split.time_range.clone(),
+        size_in_bytes: split.size_in_bytes,
+        generation: 0,
+        split_state: SplitState::New,
+        update_timestamp: Utc::now().timestamp(),
+    }
+}
+
+async fn stage_split(
+    metastore: Arc<dyn Metastore>,
+    split_storage: Arc<dyn Storage>,
+    split: &PackagedSplit,
+) -> anyhow::Result<SplitMetadata> {
+    let split_metadata = create_split_metadata(split);
+    metastore
+        .stage_split(&split.index_id, split_metadata.clone())
+        .await?;
+    Ok(split_metadata)
+}
+
 #[async_trait]
 impl AsyncActor for Uploader {
     async fn process_message(
         &mut self,
         split: PackagedSplit,
-        context: ActorContext<'_, Self::Message>,
+        _context: ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         let split_storage =
             quickwit_storage::add_prefix_to_storage(self.index_storage.clone(), split.split_id);
+        let metastore = self.metastore.clone();
+        // upload_split(self.metastore);
         Ok(())
     }
 }

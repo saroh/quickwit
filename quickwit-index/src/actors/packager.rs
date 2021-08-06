@@ -97,9 +97,13 @@ fn merge_segments_in_split(mut split: IndexedSplit) -> anyhow::Result<PackagedSp
     }
     let segment_metas: Vec<SegmentMeta> = split.index.searchable_segment_metas()?;
     if segment_metas.len() != 1 {
-        anyhow::bail!("Ended up with more than one segment despite successful merge. {:?}", split);
+        anyhow::bail!(
+            "Ended up with more than one segment despite successful merge. {:?}",
+            split
+        );
     }
     let packaged_split = PackagedSplit {
+        index_id: split.index_id.clone(),
         split_id: split.split_id.to_string(),
         split_scratch_dir: split.temp_dir,
         num_docs,
@@ -126,8 +130,9 @@ impl SyncActor for Packager {
         context: quickwit_actors::ActorContext<'_, Self::Message>,
     ) -> Result<(), quickwit_actors::MessageProcessError> {
         commit_split(&mut split)?;
-        let mut packaged_split = merge_segments_in_split(split)?;
+        let packaged_split = merge_segments_in_split(split)?;
         build_hotcache(&packaged_split)?;
+        self.sink.send_blocking(packaged_split)?;
         Ok(())
     }
 }

@@ -156,15 +156,17 @@ impl Split {
     /// Update the split metadata (num_records, time_range) based on incomming document.
     fn update_metadata(&mut self, doc: &Document) -> anyhow::Result<()> {
         if let Some(timestamp_field) = self.timestamp_field {
-            let split_time_range = self.metadata.time_range.as_mut()
-                .with_context(|| "Split time range must be set if timestamp field is present.")?;
+            let split_time_range =
+                self.metadata.time_range.as_mut().with_context(|| {
+                    "Split time range must be set if timestamp field is present."
+                })?;
             if let Some(timestamp) = doc
                 .get_first(timestamp_field)
                 .and_then(|field_value| field_value.i64_value())
             {
                 *split_time_range = RangeInclusive::new(
                     timestamp.min(*split_time_range.start()),
-                    timestamp.max(*split_time_range.end())
+                    timestamp.max(*split_time_range.end()),
                 );
             }
         };
