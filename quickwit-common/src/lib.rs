@@ -24,6 +24,9 @@ use std::net::{SocketAddr, ToSocketAddrs};
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+/// Filenames used for hotcache files.
+pub const HOTCACHE_FILENAME: &str = "hotcache";
+
 /// For the moment, the only metastore available is the
 /// a one file per index store, located on the same storage as the
 /// index.
