@@ -38,8 +38,6 @@ pub mod actors;
 pub mod models;
 pub(crate) mod semaphore;
 
-const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
-
 pub async fn run_indexing(
     index_id: String,
     metastore: Arc<dyn Metastore>,

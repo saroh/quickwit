@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 // Quickwit
 //  Copyright (C) 2021 Quickwit Inc.
 //
@@ -20,12 +18,18 @@ use std::sync::Arc;
 //  You should have received a copy of the GNU Affero General Public License
 //  along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+use std::sync::Arc;
+
+/// Semaphore for which the guard has a 'static lifetime.
+/// This is just a wrapper over the normal tokio Semaphore.
+///
 /// This is a trick to get semaphore for which the SemaphoreGuard has a 'static lifetime.
 pub(crate) struct Semaphore {
     inner: Arc<tokio::sync::Semaphore>,
 }
 
 impl Semaphore {
+    /// Creates a semaphore allowing `num_permits`.
     pub fn new(num_permits: usize) -> Semaphore {
         let inner_semaphore = tokio::sync::Semaphore::new(num_permits);
         Semaphore {
@@ -33,6 +37,8 @@ impl Semaphore {
         }
     }
 
+    /// Tries to acquire a new permit.
+    /// If no permit is available, wait asynchronously for a permit to be released.
     pub async fn acquire(&self) -> SemaphoreGuard {
         self.inner
             .acquire()
@@ -45,6 +51,10 @@ impl Semaphore {
     }
 }
 
+/// The semaphore guard defines -by its lifetime- the amount of time
+/// the permit given by the semaphore is held.
+///
+/// Upon drop, the semaphore is increased.
 pub struct SemaphoreGuard {
     permits: Arc<tokio::sync::Semaphore>,
 }
@@ -52,5 +62,32 @@ pub struct SemaphoreGuard {
 impl Drop for SemaphoreGuard {
     fn drop(&mut self) {
         self.permits.add_permits(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::mem;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    #[tokio::test]
+    async fn test_semaphore() {
+        let finished_task = Arc::new(AtomicUsize::default());
+        const NUM_CONCURRENT_TASKS: usize = 3;
+        let semaphore = Semaphore::new(NUM_CONCURRENT_TASKS);
+        for i in 1..1_000 {
+            let guard = semaphore.acquire().await;
+            // Thanks to the semaphore we have the guarantee that at most NUM_CONCURRENT_TASKS tasks are running
+            // at the same time.
+            // In other words, upon acquisition of guard, we know that at least (i - 3) tasks have terminated.
+            assert!(finished_task.load(Ordering::SeqCst) + NUM_CONCURRENT_TASKS >= i);
+            let finished_task_clone = finished_task.clone();
+            tokio::task::spawn(async move {
+                finished_task_clone.fetch_add(1, Ordering::SeqCst);
+                mem::drop(guard);
+            });
+        }
     }
 }

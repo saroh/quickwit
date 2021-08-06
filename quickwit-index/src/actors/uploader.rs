@@ -258,6 +258,10 @@ impl AsyncActor for Uploader {
         context: ActorContext<'_, Self::Message>,
     ) -> Result<(), MessageProcessError> {
         let (split_uploaded_tx, split_uploaded_rx) = tokio::sync::oneshot::channel();
+
+        // We send the future to the publisher right away.
+        // That way the publisher will process the uploaded split in order as opposed to
+        // publishing in the order splits finish their uploading.
         self.sink.send_async(split_uploaded_rx).await?;
 
         // The juggling here happens because the permit lifetime prevents it from being passed to a task.
