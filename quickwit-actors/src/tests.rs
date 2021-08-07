@@ -1,5 +1,6 @@
-use crate::actor::{Actor, KillSwitch};
 use crate::mailbox::Command;
+use crate::Actor;
+use crate::KillSwitch;
 use crate::{ActorContext, AsyncActor, Mailbox, MessageProcessError, Observation, SyncActor};
 use async_trait::async_trait;
 use std::collections::HashSet;
