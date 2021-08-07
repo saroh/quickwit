@@ -289,7 +289,7 @@ mod tests {
         let indexed_split = make_indexed_split_for_test(&[&[1628203589, 1628203640]])?;
         packager_handle.mailbox().send_async(indexed_split).await?;
         assert_eq!(
-            packager_handle.process_and_observe().await,
+            packager_handle.process_pending_and_observe().await,
             Observation::Running(())
         );
         let packaged_splits = inbox.drain_available_message_for_test();
@@ -306,7 +306,7 @@ mod tests {
         let indexed_split = make_indexed_split_for_test(&[&[1628203589], &[1628203640]])?;
         packager_handle.mailbox().send_async(indexed_split).await?;
         assert_eq!(
-            packager_handle.process_and_observe().await,
+            packager_handle.process_pending_and_observe().await,
             Observation::Running(())
         );
         let packaged_splits = inbox.drain_available_message_for_test();

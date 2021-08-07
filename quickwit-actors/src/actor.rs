@@ -1,6 +1,6 @@
 use std::any::type_name;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::error;
@@ -75,25 +75,72 @@ pub trait Actor: Send + Sync + 'static {
 ///
 /// If no progress is observed until the next heartbeat, the actor will be killed.
 #[derive(Clone)]
-pub struct Progress(Arc<AtomicBool>);
+pub struct Progress(Arc<AtomicU8>);
+
+#[repr(u8)]
+#[derive(Clone, Debug, Copy)]
+enum ProgressState {
+    // No update recorded since the last call to .check_for_update()
+    NoUpdate = 0,
+    // An update was recorded since the last call to .check_for_update()
+    Updated = 1,
+    // The actor is in the protected zone.
+    //
+    // The protected zone should seldom be used. It is useful
+    // when calling an external library that is blocking for instance.
+    //
+    // Another use case is blocking when sending a message to another actor
+    // with a saturated message bus.
+    // The failure detection is then considered to be the problem of
+    // the downstream actor.
+    //
+    // As long as the actor is in the protected zone, healthchecking won't apply
+    // to it.
+    ProtectedZone = 2,
+}
 
 impl Default for Progress {
     fn default() -> Progress {
-        Progress(Arc::new(AtomicBool::new(false)))
+        Progress(Arc::new(AtomicU8::new(ProgressState::Updated as u8)))
     }
 }
 
 impl Progress {
     pub fn record_progress(&self) {
-        self.0.store(true, Ordering::Relaxed);
+        self.0
+            .fetch_max(ProgressState::Updated as u8, Ordering::Relaxed);
     }
 
-    pub fn has_changed(&self) -> bool {
-        self.0.load(Ordering::Relaxed)
+    pub fn protect_zone(&self) -> ProtectZoneGuard {
+        self.0
+            .store(ProgressState::ProtectedZone as u8, Ordering::SeqCst);
+        ProtectZoneGuard(self.0.clone())
     }
 
-    pub fn reset(&self) {
-        self.0.store(false, Ordering::Relaxed);
+    /// This method mutates the state as follows and returns true if
+    /// the object was in the protected zone or had change registered.
+    /// - Updated -> NoUpdate, returns true
+    /// - NoUpdate -> Updated, returns true
+    /// - ProtectedZone -> ProtectedZone, returns true
+    pub fn harvest_changes(&self) -> bool {
+        let previous_state = self
+            .0
+            .compare_exchange(
+                ProgressState::Updated as u8,
+                ProgressState::NoUpdate as u8,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            )
+            .unwrap_or_else(|previous_value| previous_value);
+        previous_state != ProgressState::NoUpdate as u8
+    }
+}
+
+pub struct ProtectZoneGuard(Arc<AtomicU8>);
+
+impl Drop for ProtectZoneGuard {
+    fn drop(&mut self) {
+        self.0.store(ProgressState::Updated as u8, Ordering::SeqCst)
     }
 }
 
@@ -139,6 +186,8 @@ impl<'a, Message> ActorContext<'a, Message> {
 
 #[cfg(test)]
 mod tests {
+    use crate::Progress;
+
     use super::KillSwitch;
 
     #[test]
@@ -149,5 +198,29 @@ mod tests {
         assert_eq!(kill_switch.is_alive(), false);
         kill_switch.kill();
         assert_eq!(kill_switch.is_alive(), false);
+    }
+
+    #[test]
+    fn test_progress() {
+        let progress = Progress::default();
+        assert!(progress.harvest_changes());
+        progress.record_progress();
+        assert!(progress.harvest_changes());
+        assert!(!progress.harvest_changes());
+    }
+
+    #[test]
+    fn test_progress_protect_zone() {
+        let progress = Progress::default();
+        assert!(progress.harvest_changes());
+        progress.record_progress();
+        assert!(progress.harvest_changes());
+        {
+            let _protect_guard = progress.protect_zone();
+            assert!(progress.harvest_changes());
+            assert!(progress.harvest_changes());
+        }
+        assert!(progress.harvest_changes());
+        assert!(!progress.harvest_changes());
     }
 }

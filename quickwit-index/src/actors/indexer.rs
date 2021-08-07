@@ -250,7 +250,10 @@ mod tests {
                 docs: vec!["{\"body\": \"happy3\"}".to_string()],
             })
             .await?;
-        let indexer_counters = indexer_handle.process_and_observe().await.into_inner();
+        let indexer_counters = indexer_handle
+            .process_pending_and_observe()
+            .await
+            .into_inner();
         assert_eq!(indexer_counters.num_docs, 3);
         assert_eq!(indexer_counters.num_parse_errors, 1);
         let output_messages = inbox.drain_available_message_for_test();
