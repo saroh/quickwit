@@ -1,6 +1,6 @@
 use std::any::type_name;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
 use tracing::error;
@@ -75,15 +75,14 @@ pub trait Actor: Send + Sync + 'static {
 ///
 /// If no progress is observed until the next heartbeat, the actor will be killed.
 #[derive(Clone)]
-pub struct Progress(Arc<AtomicU8>);
+pub struct Progress(Arc<AtomicU32>);
 
-#[repr(u8)]
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
 enum ProgressState {
     // No update recorded since the last call to .check_for_update()
-    NoUpdate = 0,
+    NoUpdate,
     // An update was recorded since the last call to .check_for_update()
-    Updated = 1,
+    Updated,
     // The actor is in the protected zone.
     //
     // The protected zone should seldom be used. It is useful
@@ -96,25 +95,63 @@ enum ProgressState {
     //
     // As long as the actor is in the protected zone, healthchecking won't apply
     // to it.
-    ProtectedZone = 2,
+    //
+    // The value inside starts at 0.
+    ProtectedZone(u32),
+}
+
+impl Into<u32> for ProgressState {
+    fn into(self) -> u32 {
+        match self {
+            ProgressState::NoUpdate => 0,
+            ProgressState::Updated => 1,
+            ProgressState::ProtectedZone(level) => 2 + level,
+        }
+    }
+}
+
+impl From<u32> for ProgressState {
+    fn from(level: u32) -> Self {
+        match level {
+            0 => ProgressState::NoUpdate,
+            1 => ProgressState::Updated,
+            level => ProgressState::ProtectedZone(level - 2),
+        }
+    }
 }
 
 impl Default for Progress {
     fn default() -> Progress {
-        Progress(Arc::new(AtomicU8::new(ProgressState::Updated as u8)))
+        Progress(Arc::new(AtomicU32::new(ProgressState::Updated.into())))
     }
 }
 
 impl Progress {
     pub fn record_progress(&self) {
         self.0
-            .fetch_max(ProgressState::Updated as u8, Ordering::Relaxed);
+            .fetch_max(ProgressState::Updated.into(), Ordering::Relaxed);
     }
 
     pub fn protect_zone(&self) -> ProtectZoneGuard {
-        self.0
-            .store(ProgressState::ProtectedZone as u8, Ordering::SeqCst);
-        ProtectZoneGuard(self.0.clone())
+        loop {
+            let previous_state: ProgressState = self.0.load(Ordering::SeqCst).into();
+            let new_state = match previous_state {
+                ProgressState::NoUpdate | ProgressState::Updated => ProgressState::ProtectedZone(0),
+                ProgressState::ProtectedZone(level) => ProgressState::ProtectedZone(level + 1),
+            };
+            if self
+                .0
+                .compare_exchange(
+                    previous_state.into(),
+                    new_state.into(),
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                )
+                .is_ok()
+            {
+                return ProtectZoneGuard(self.0.clone());
+            }
+        }
     }
 
     /// This method mutates the state as follows and returns true if
@@ -123,24 +160,26 @@ impl Progress {
     /// - NoUpdate -> Updated, returns true
     /// - ProtectedZone -> ProtectedZone, returns true
     pub fn harvest_changes(&self) -> bool {
-        let previous_state = self
+        let previous_state: ProgressState = self
             .0
             .compare_exchange(
-                ProgressState::Updated as u8,
-                ProgressState::NoUpdate as u8,
+                ProgressState::Updated.into(),
+                ProgressState::NoUpdate.into(),
                 Ordering::Relaxed,
                 Ordering::Relaxed,
             )
-            .unwrap_or_else(|previous_value| previous_value);
-        previous_state != ProgressState::NoUpdate as u8
+            .unwrap_or_else(|previous_value| previous_value)
+            .into();
+        previous_state != ProgressState::NoUpdate
     }
 }
 
-pub struct ProtectZoneGuard(Arc<AtomicU8>);
+pub struct ProtectZoneGuard(Arc<AtomicU32>);
 
 impl Drop for ProtectZoneGuard {
     fn drop(&mut self) {
-        self.0.store(ProgressState::Updated as u8, Ordering::SeqCst)
+        let previous_state: ProgressState = self.0.fetch_sub(1, Ordering::SeqCst).into();
+        assert!(matches!(previous_state, ProgressState::ProtectedZone(_)));
     }
 }
 
@@ -220,6 +259,24 @@ mod tests {
             assert!(progress.harvest_changes());
             assert!(progress.harvest_changes());
         }
+        assert!(progress.harvest_changes());
+        assert!(!progress.harvest_changes());
+    }
+
+    #[test]
+    fn test_progress_several_protect_zone() {
+        let progress = Progress::default();
+        assert!(progress.harvest_changes());
+        progress.record_progress();
+        assert!(progress.harvest_changes());
+        let first_protect_guard = progress.protect_zone();
+        let second_protect_guard = progress.protect_zone();
+        assert!(progress.harvest_changes());
+        assert!(progress.harvest_changes());
+        std::mem::drop(first_protect_guard);
+        assert!(progress.harvest_changes());
+        assert!(progress.harvest_changes());
+        std::mem::drop(second_protect_guard);
         assert!(progress.harvest_changes());
         assert!(!progress.harvest_changes());
     }
