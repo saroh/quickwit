@@ -34,7 +34,9 @@ use quickwit_common::GREEN_COLOR;
 use quickwit_config::{
     IndexConfig, IndexerConfig, SourceConfig, SourceParams, CLI_INGEST_SOURCE_ID,
 };
-use quickwit_core::{clear_cache_directory, remove_indexing_directory, IndexService};
+use quickwit_core::{
+    clear_cache_directory, remove_indexing_directory, validate_storage_uri, IndexService,
+};
 use quickwit_doc_mapper::tag_pruning::match_tag_field_name;
 use quickwit_indexing::actors::{IndexingPipeline, IndexingService};
 use quickwit_indexing::models::{
@@ -129,6 +131,8 @@ pub fn build_index_command<'a>() -> Command<'a> {
                         .required(false),
                     arg!(--"end-timestamp" <TIMESTAMP> "Filters out documents after that timestamp (time-series indexes only).")
                         .required(false),
+                    arg!(--"sort-by-score" "Setting this flag calculates and sorts documents by their BM25 score.")
+                        .required(false),
                 ])
             )
         .subcommand(
@@ -218,6 +222,7 @@ pub struct SearchIndexArgs {
     pub end_timestamp: Option<i64>,
     pub config_uri: Uri,
     pub data_dir: Option<PathBuf>,
+    pub sort_by_score: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -389,6 +394,7 @@ impl IndexCliCommand {
         let search_fields = matches
             .values_of("search-fields")
             .map(|values| values.map(|value| value.to_string()).collect());
+        let sort_by_score = matches.is_present("sort-by-score");
         let start_timestamp = if matches.is_present("start-timestamp") {
             Some(matches.value_of_t::<i64>("start-timestamp")?)
         } else {
@@ -415,6 +421,7 @@ impl IndexCliCommand {
             end_timestamp,
             config_uri,
             data_dir,
+            sort_by_score,
         }))
     }
 
@@ -777,6 +784,9 @@ pub async fn create_index_cli(args: CreateIndexArgs) -> anyhow::Result<()> {
     let metastore = metastore_uri_resolver
         .resolve(&quickwit_config.metastore_uri)
         .await?;
+
+    validate_storage_uri(metastore_uri_resolver, &quickwit_config, &index_config).await?;
+
     let index_service = IndexService::new(
         metastore,
         quickwit_storage_uri_resolver().clone(),
@@ -895,7 +905,7 @@ pub async fn search_index(args: SearchIndexArgs) -> anyhow::Result<SearchRespons
         max_hits: args.max_hits as u64,
         start_offset: args.start_offset as u64,
         sort_order: None,
-        sort_by_field: None,
+        sort_by_field: args.sort_by_score.then_some("_score".to_string()),
         aggregation_request: args.aggregation,
     };
     let search_response: SearchResponse =
