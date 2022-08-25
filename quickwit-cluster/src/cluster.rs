@@ -26,7 +26,7 @@ use std::time::Duration;
 use chitchat::transport::Transport;
 use chitchat::{
     spawn_chitchat, ChitchatConfig, ChitchatHandle, ClusterStateSnapshot, FailureDetectorConfig,
-    NodeId,
+    NodeId, NodeState,
 };
 use itertools::Itertools;
 use serde::{Deserialize, Serialize};
@@ -34,70 +34,66 @@ use tokio::sync::watch;
 use tokio::time::timeout;
 use tokio_stream::wrappers::WatchStream;
 use tokio_stream::StreamExt;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{ClusterError, ClusterResult};
 use crate::QuickwitService;
 
-const GRPC_ADDRESS_KEY: &str = "grpc_address";
-const GOSSIP_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_millis(200)
+const HEALTH_KEY: &str = "health";
+const HEALTH_VALUE_READY: &str = "READY";
+const HEALTH_VALUE_NOT_READY: &str = "NOT_READY";
+const GRPC_ADVERTISE_ADDR_KEY: &str = "grpc_advertise_addr";
+const GOSSIP_INTERVAL: Duration = if cfg!(any(test, feature = "testsuite")) {
+    Duration::from_millis(25)
 } else {
     Duration::from_secs(1)
 };
 const AVAILABLE_SERVICES_KEY: &str = "available_services";
 
-/// A member information.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Member {
-    /// An ID that makes a member unique.
+/// Cluster member.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClusterMember {
+    /// An ID that makes a member unique. Chitchat node ID is built from
+    /// the concatenation `{node_unique_id}/{generation}`.
     pub node_unique_id: String,
-    /// timestamp (ms) when node starts.
+    /// Timestamp (ms) when node starts.
     pub generation: u64,
-    /// advertised UdpServerSocket
-    pub gossip_public_address: SocketAddr,
+    /// Gossip advertise address.
+    pub gossip_advertise_addr: SocketAddr,
     /// If true, it means self.
     pub is_self: bool,
+    /// Available services.
+    pub available_services: HashSet<QuickwitService>,
+    /// gRPC advertise address.
+    pub grpc_advertise_addr: SocketAddr,
 }
 
-impl Member {
-    pub fn new(node_unique_id: String, generation: u64, gossip_public_address: SocketAddr) -> Self {
+impl ClusterMember {
+    pub fn new(
+        node_unique_id: String,
+        generation: u64,
+        gossip_advertise_addr: SocketAddr,
+        available_services: HashSet<QuickwitService>,
+        grpc_advertise_addr: SocketAddr,
+    ) -> Self {
         Self {
             node_unique_id,
-            gossip_public_address,
             generation,
+            gossip_advertise_addr,
             is_self: true,
+            available_services,
+            grpc_advertise_addr,
         }
     }
 
-    pub fn internal_id(&self) -> String {
+    pub fn chitchat_id(&self) -> String {
         format!("{}/{}", self.node_unique_id, self.generation)
     }
 }
 
-impl TryFrom<NodeId> for Member {
-    type Error = anyhow::Error;
-
-    fn try_from(node_id: NodeId) -> Result<Self, Self::Error> {
-        let (node_unique_id_str, generation_str) = node_id.id.split_once('/').ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not create a Member instance from NodeId `{}`",
-                node_id.id
-            )
-        })?;
-
-        Ok(Self {
-            node_unique_id: node_unique_id_str.to_string(),
-            generation: generation_str.parse()?,
-            gossip_public_address: node_id.gossip_public_address,
-            is_self: false,
-        })
-    }
-}
-
-impl From<Member> for NodeId {
-    fn from(member: Member) -> Self {
-        Self::new(member.internal_id(), member.gossip_public_address)
+impl From<ClusterMember> for NodeId {
+    fn from(member: ClusterMember) -> Self {
+        Self::new(member.chitchat_id(), member.gossip_advertise_addr)
     }
 }
 
@@ -115,7 +111,7 @@ pub struct Cluster {
     chitchat_handle: ChitchatHandle,
 
     /// A receiver (channel) for exchanging information about the nodes in the cluster.
-    members: watch::Receiver<Vec<Member>>,
+    members: watch::Receiver<Vec<ClusterMember>>,
 
     /// A stop flag of cluster monitoring task.
     /// Once the cluster is created, a task to monitor cluster events will be started.
@@ -124,17 +120,22 @@ pub struct Cluster {
     stop: Arc<AtomicBool>,
 }
 
+fn is_ready_predicate(node_state: &NodeState) -> bool {
+    node_state
+        .get(HEALTH_KEY)
+        .map(|health_value| health_value == HEALTH_VALUE_READY)
+        .unwrap_or(false)
+}
+
 impl Cluster {
     /// Create a cluster given a host key and a listen address.
     /// When a cluster is created, the thread that monitors cluster events
     /// will be started at the same time.
     #[allow(clippy::too_many_arguments)] // TODO refactor me #1480
     pub async fn join(
-        me: Member,
-        services: &HashSet<QuickwitService>,
+        me: ClusterMember,
         gossip_listen_addr: SocketAddr,
         cluster_id: String,
-        grpc_public_addr: SocketAddr,
         peer_seed_addrs: Vec<String>,
         failure_detector_config: FailureDetectorConfig,
         transport: &dyn Transport,
@@ -142,9 +143,10 @@ impl Cluster {
         info!(
             cluster_id = %cluster_id,
             node_id = %me.node_unique_id,
-            grpc_public_addr = %grpc_public_addr,
+            grpc_public_addr = %me.grpc_advertise_addr,
+            available_services = ?me.available_services,
             gossip_listen_addr = %gossip_listen_addr,
-            gossip_public_addr = %me.gossip_public_address,
+            gossip_public_addr = %me.gossip_advertise_addr,
             peer_seed_addrs = %peer_seed_addrs.join(", "),
             "Joining cluster."
         );
@@ -155,15 +157,23 @@ impl Cluster {
             listen_addr: gossip_listen_addr,
             seed_nodes: peer_seed_addrs,
             failure_detector_config,
+            is_ready_predicate: Some(Box::new(is_ready_predicate)),
         };
         let chitchat_handle = spawn_chitchat(
             chitchat_config,
             vec![
-                (GRPC_ADDRESS_KEY.to_string(), grpc_public_addr.to_string()),
+                (
+                    GRPC_ADVERTISE_ADDR_KEY.to_string(),
+                    me.grpc_advertise_addr.to_string(),
+                ),
                 (
                     AVAILABLE_SERVICES_KEY.to_string(),
-                    services.iter().map(|service| service.as_str()).join(","),
+                    me.available_services
+                        .iter()
+                        .map(|service| service.as_str())
+                        .join(","),
                 ),
+                (HEALTH_KEY.to_string(), HEALTH_VALUE_NOT_READY.to_string()),
             ],
             transport,
         )
@@ -178,8 +188,8 @@ impl Cluster {
 
         // Create cluster.
         let cluster = Cluster {
-            cluster_id,
-            node_id: me.internal_id(),
+            cluster_id: cluster_id.clone(),
+            node_id: me.chitchat_id(),
             gossip_listen_addr,
             chitchat_handle,
             members: members_receiver,
@@ -187,7 +197,7 @@ impl Cluster {
         };
 
         // Add itself as the initial member of the cluster.
-        let initial_members: Vec<Member> = vec![me.clone()];
+        let initial_members: Vec<ClusterMember> = vec![me.clone()];
         if members_sender.send(initial_members).is_err() {
             error!("Failed to add itself as the initial member of the cluster.");
         }
@@ -195,13 +205,26 @@ impl Cluster {
         // Prepare to start a task that will monitor cluster events.
         let task_stop = cluster.stop.clone();
         tokio::task::spawn(async move {
-            let mut node_change_receiver = chitchat.lock().await.live_nodes_watcher();
+            let mut node_change_receiver = chitchat.lock().await.ready_nodes_watcher();
 
             while let Some(members_set) = node_change_receiver.next().await {
+                let state_snapshot = chitchat.lock().await.state_snapshot();
                 let mut members = members_set
                     .into_iter()
-                    .map(Member::try_from)
-                    .collect::<Result<Vec<_>, _>>()?;
+                    // TODO: this is weird to build a member from the snapshot. 
+                    // By making chitchat `NodeState` public, we would be able to build a member from a `NodeId` and `NodeState`
+                    .map(|node_id| build_cluster_member(&node_id, &state_snapshot))
+                    .filter_map(|member_res| {
+                        // Just log an error for members that cannot be built.
+                        if let Err(error) = &member_res {
+                            error!(
+                                error=?error,
+                                "Failed to build cluster member from cluster state, ignoring member.",
+                            );
+                        }
+                        member_res.ok()
+                    })
+                    .collect_vec();
                 members.push(me.clone());
 
                 if task_stop.load(Ordering::Relaxed) {
@@ -222,58 +245,26 @@ impl Cluster {
     }
 
     /// Return [WatchStream] for monitoring change of `members`
-    pub fn member_change_watcher(&self) -> WatchStream<Vec<Member>> {
+    pub fn member_change_watcher(&self) -> WatchStream<Vec<ClusterMember>> {
         WatchStream::new(self.members.clone())
     }
 
     /// Return `members` list
-    pub fn members(&self) -> Vec<Member> {
+    pub fn members(&self) -> Vec<ClusterMember> {
         self.members.borrow().clone()
     }
 
     /// Returns the gRPC addresses of the members providing the specified service.
-    pub async fn members_grpc_addresses_for_service(
+    pub fn members_grpc_advertise_addr_for_service(
         &self,
-        service: QuickwitService,
-    ) -> anyhow::Result<Vec<SocketAddr>> {
-        let chitchat = self.chitchat_handle.chitchat();
-        let chitchat_guard = chitchat.lock().await;
-        let mut grpc_addresses = vec![];
-        for member in self.members() {
-            let node_state = chitchat_guard
-                .node_state(&NodeId::from(member.clone()))
-                .unwrap();
-
-            let available_services_val_opt = node_state.get(AVAILABLE_SERVICES_KEY);
-            if available_services_val_opt.is_none() {
-                error!(
-                    "Could not find `{}` key on node `{}` state.",
-                    AVAILABLE_SERVICES_KEY,
-                    member.internal_id()
-                );
-                continue;
-            }
-
-            let available_services =
-                parse_available_services_val(available_services_val_opt.unwrap(), &member);
-            if !available_services.contains(&service) {
-                continue;
-            }
-
-            let grpc_address = node_state
-                .get(GRPC_ADDRESS_KEY)
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Could not find `{}` key on node `{}` state.",
-                        GRPC_ADDRESS_KEY,
-                        member.internal_id()
-                    )
-                })
-                .map(|addr_str| addr_str.parse::<SocketAddr>())??;
-            grpc_addresses.push(grpc_address);
-        }
-
-        Ok(grpc_addresses)
+        service: &QuickwitService,
+    ) -> Vec<SocketAddr> {
+        self.members
+            .borrow()
+            .iter()
+            .filter(|member| member.available_services.contains(service))
+            .map(|member| member.grpc_advertise_addr)
+            .collect_vec()
     }
 
     /// Set a key-value pair on the cluster node's state.
@@ -281,14 +272,6 @@ impl Cluster {
         let chitchat = self.chitchat_handle.chitchat();
         let mut chitchat_guard = chitchat.lock().await;
         chitchat_guard.self_node_state().set(key, value);
-    }
-
-    /// Leave the cluster.
-    pub async fn leave(&self) {
-        info!(self_addr = ?self.gossip_listen_addr, "Leaving the cluster.");
-        // TODO: implements leave/join on Chitchat
-        // https://github.com/quickwit-oss/chitchat/issues/30
-        self.stop.store(true, Ordering::Relaxed);
     }
 
     pub async fn state(&self) -> ClusterState {
@@ -299,6 +282,8 @@ impl Cluster {
         let live_nodes = chitchat_guard.live_nodes().cloned().collect::<Vec<_>>();
         let dead_nodes = chitchat_guard.dead_nodes().cloned().collect::<Vec<_>>();
         ClusterState {
+            cluster_id: self.cluster_id.clone(),
+            self_node_id: self.node_id.clone(),
             state,
             live_nodes,
             dead_nodes,
@@ -324,7 +309,7 @@ impl Cluster {
         timeout_after: Duration,
     ) -> anyhow::Result<()>
     where
-        F: FnMut(&Vec<Member>) -> bool,
+        F: FnMut(&[ClusterMember]) -> bool,
     {
         timeout(
             timeout_after,
@@ -335,32 +320,107 @@ impl Cluster {
         .await?;
         Ok(())
     }
+
+    pub async fn set_self_node_ready(&self, ready: bool) {
+        let health_value = if ready {
+            HEALTH_VALUE_READY
+        } else {
+            HEALTH_VALUE_NOT_READY
+        };
+        self.set_key_value(HEALTH_KEY, health_value).await
+    }
+
+    pub async fn is_self_node_ready(&self) -> bool {
+        let chitchat = self.chitchat_handle.chitchat();
+        let mut chitchat_mutex = chitchat.lock().await;
+        let node_state = chitchat_mutex.self_node_state();
+        is_ready_predicate(node_state)
+    }
+}
+
+// Build a cluster member from [`NodeId`] and [`ClusterStateSnapshot`].
+// TODO: make `NodeState` public and use a wrapper `QuickwitNodeState`
+// that will extract quickwit specific keys and values stored in `NodeState`.
+fn build_cluster_member<'a>(
+    node_id: &'a NodeId,
+    cluster_state_snapshot: &'a ClusterStateSnapshot,
+) -> anyhow::Result<ClusterMember> {
+    let node_state = cluster_state_snapshot
+        .node_states
+        .get(&node_id.id)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Could not find node id `{}` in ChitChat state.", node_id.id,)
+        })?;
+    let available_services = node_state
+        .get(AVAILABLE_SERVICES_KEY)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not find `{}` key in node `{}` state.",
+                AVAILABLE_SERVICES_KEY,
+                node_id.id
+            )
+        })
+        .map(|available_services_val| {
+            parse_available_services_val(available_services_val, &node_id.id)
+        })??;
+    let grpc_advertise_addr = node_state
+        .get(GRPC_ADVERTISE_ADDR_KEY)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Could not find `{}` key in node `{}` state.",
+                GRPC_ADVERTISE_ADDR_KEY,
+                node_id.id
+            )
+        })
+        .map(|addr_str| addr_str.parse::<SocketAddr>())??;
+    let (node_unique_id, generation_str) = node_id.id.split_once('/').ok_or_else(|| {
+        anyhow::anyhow!(
+            "Failed to create cluster member instance from NodeId `{}`.",
+            node_id.id
+        )
+    })?;
+    let generation = generation_str.parse()?;
+    Ok(ClusterMember::new(
+        node_unique_id.to_string(),
+        generation,
+        node_id.gossip_public_address,
+        available_services,
+        grpc_advertise_addr,
+    ))
 }
 
 fn parse_available_services_val(
     available_services_val: &str,
-    member: &Member,
-) -> Vec<QuickwitService> {
-    let mut available_services = vec![];
+    node_id: &str,
+) -> anyhow::Result<HashSet<QuickwitService>> {
+    let mut available_services = HashSet::new();
+    // Case where a node was started without any services.
+    if available_services_val.is_empty() {
+        warn!(node_id=%node_id, "Node has no available services.");
+        return Ok(available_services);
+    }
     let available_services_str = available_services_val.split(',');
     for service_str in available_services_str {
-        match QuickwitService::try_from(service_str) {
-            Ok(service) => available_services.push(service),
-            Err(_) => error!(
-                "Unknown service found `{}` on node `{}` state.",
-                service_str,
-                member.internal_id()
-            ),
+        if let Ok(service) = QuickwitService::try_from(service_str) {
+            available_services.insert(service);
+        } else {
+            warn!(
+                node_id=%node_id,
+                service=%service_str,
+                "Unknown service found in node state."
+            );
         }
     }
-    available_services
+    Ok(available_services)
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ClusterState {
-    state: ClusterStateSnapshot,
-    live_nodes: Vec<NodeId>,
-    dead_nodes: Vec<NodeId>,
+    pub cluster_id: String,
+    pub self_node_id: String,
+    pub state: ClusterStateSnapshot,
+    pub live_nodes: Vec<NodeId>,
+    pub dead_nodes: Vec<NodeId>,
 }
 
 /// Compute the gRPC port from the chitchat listen address for tests.
@@ -375,21 +435,27 @@ pub async fn create_cluster_for_test_with_id(
     seeds: Vec<String>,
     services: &HashSet<QuickwitService>,
     transport: &dyn Transport,
+    self_node_is_ready: bool,
 ) -> anyhow::Result<Cluster> {
-    let listen_addr: SocketAddr = ([127, 0, 0, 1], node_id).into();
+    let gossip_advertise_addr: SocketAddr = ([127, 0, 0, 1], node_id).into();
     let node_id = format!("node_{node_id}");
     let failure_detector_config = create_failure_detector_config_for_test();
     let cluster = Cluster::join(
-        Member::new(node_id, 1, listen_addr),
-        services,
-        listen_addr,
+        ClusterMember::new(
+            node_id,
+            1,
+            gossip_advertise_addr,
+            services.clone(),
+            grpc_addr_from_listen_addr_for_test(gossip_advertise_addr),
+        ),
+        gossip_advertise_addr,
         cluster_id,
-        grpc_addr_from_listen_addr_for_test(listen_addr),
         seeds,
         failure_detector_config,
         transport,
     )
     .await?;
+    cluster.set_self_node_ready(self_node_is_ready).await;
     Ok(cluster)
 }
 
@@ -407,6 +473,7 @@ pub async fn create_cluster_for_test(
     seeds: Vec<String>,
     services: &[&str],
     transport: &dyn Transport,
+    self_node_is_ready: bool,
 ) -> anyhow::Result<Cluster> {
     static NODE_AUTO_INCREMENT: AtomicU16 = AtomicU16::new(1u16);
     let node_id = NODE_AUTO_INCREMENT.fetch_add(1, Ordering::Relaxed);
@@ -420,6 +487,7 @@ pub async fn create_cluster_for_test(
         seeds,
         &services,
         transport,
+        self_node_is_ready,
     )
     .await?;
     Ok(cluster)
@@ -438,14 +506,39 @@ mod tests {
     #[tokio::test]
     async fn test_cluster_single_node() -> anyhow::Result<()> {
         let transport = ChannelTransport::default();
-        let cluster = create_cluster_for_test(Vec::new(), &[], &transport).await?;
+        let cluster = create_cluster_for_test(Vec::new(), &[], &transport, false).await?;
         let members: Vec<SocketAddr> = cluster
             .members()
             .iter()
-            .map(|member| member.gossip_public_address)
+            .map(|member| member.gossip_advertise_addr)
             .collect();
         let expected_members = vec![cluster.gossip_listen_addr];
         assert_eq!(members, expected_members);
+        assert!(!cluster.is_self_node_ready().await);
+        let cluster_state = cluster.state().await;
+        let self_node_state_not_ready = cluster_state
+            .state
+            .node_states
+            .get(&cluster.node_id)
+            .unwrap();
+        assert_eq!(
+            self_node_state_not_ready.get(HEALTH_KEY).unwrap(),
+            HEALTH_VALUE_NOT_READY
+        );
+        cluster.set_self_node_ready(true).await;
+        assert!(cluster.is_self_node_ready().await);
+        let cluster_state = cluster.state().await;
+        let self_node_state_ready = cluster_state
+            .state
+            .node_states
+            .get(&cluster.node_id)
+            .unwrap();
+        assert_eq!(
+            self_node_state_ready.get(HEALTH_KEY).unwrap(),
+            HEALTH_VALUE_READY
+        );
+        cluster.set_self_node_ready(false).await;
+        assert!(!cluster.is_self_node_ready().await);
         cluster.shutdown().await;
         Ok(())
     }
@@ -454,12 +547,12 @@ mod tests {
     async fn test_cluster_available_searcher() -> anyhow::Result<()> {
         quickwit_common::setup_logging_for_tests();
         let transport = ChannelTransport::default();
-        let cluster1 = create_cluster_for_test(Vec::new(), &["searcher"], &transport).await?;
+        let cluster1 = create_cluster_for_test(Vec::new(), &["searcher"], &transport, true).await?;
         let node_1 = cluster1.gossip_listen_addr.to_string();
         let cluster2 =
-            create_cluster_for_test(vec![node_1.clone()], &["searcher"], &transport).await?;
-        let cluster3 = create_cluster_for_test(vec![node_1], &["indexer"], &transport).await?;
-
+            create_cluster_for_test(vec![node_1.clone()], &["searcher"], &transport, true).await?;
+        let cluster3 =
+            create_cluster_for_test(vec![node_1], &["indexer"], &transport, true).await?;
         let mut expected_searchers = vec![
             grpc_addr_from_listen_addr_for_test(cluster1.gossip_listen_addr),
             grpc_addr_from_listen_addr_for_test(cluster2.gossip_listen_addr),
@@ -474,9 +567,8 @@ mod tests {
                 .unwrap();
         }
 
-        let mut searchers = cluster1
-            .members_grpc_addresses_for_service(QuickwitService::Searcher)
-            .await?;
+        let mut searchers =
+            cluster1.members_grpc_advertise_addr_for_service(&QuickwitService::Searcher);
         searchers.sort();
         assert_eq!(searchers, expected_searchers);
         Ok(())
@@ -487,13 +579,13 @@ mod tests {
         quickwit_common::setup_logging_for_tests();
         let transport = ChannelTransport::default();
         let cluster1 =
-            create_cluster_for_test(Vec::new(), &["searcher", "indexer"], &transport).await?;
+            create_cluster_for_test(Vec::new(), &["searcher", "indexer"], &transport, true).await?;
         let node_1 = cluster1.gossip_listen_addr.to_string();
         let cluster2 =
-            create_cluster_for_test(vec![node_1.clone()], &["indexer"], &transport).await?;
+            create_cluster_for_test(vec![node_1.clone()], &["indexer"], &transport, true).await?;
         let cluster3 =
-            create_cluster_for_test(vec![node_1], &["indexer", "searcher"], &transport).await?;
-
+            create_cluster_for_test(vec![node_1], &["indexer", "searcher"], &transport, true)
+                .await?;
         let mut expected_indexers = vec![
             grpc_addr_from_listen_addr_for_test(cluster1.gossip_listen_addr),
             grpc_addr_from_listen_addr_for_test(cluster2.gossip_listen_addr),
@@ -510,9 +602,8 @@ mod tests {
                 .unwrap();
         }
 
-        let mut indexers = cluster1
-            .members_grpc_addresses_for_service(QuickwitService::Indexer)
-            .await?;
+        let mut indexers =
+            cluster1.members_grpc_advertise_addr_for_service(&QuickwitService::Indexer);
         indexers.sort();
         assert_eq!(indexers, expected_indexers);
 
@@ -523,10 +614,10 @@ mod tests {
     async fn test_cluster_multiple_nodes() -> anyhow::Result<()> {
         quickwit_common::setup_logging_for_tests();
         let transport = ChannelTransport::default();
-        let cluster1 = create_cluster_for_test(Vec::new(), &[], &transport).await?;
+        let cluster1 = create_cluster_for_test(Vec::new(), &[], &transport, true).await?;
         let node_1 = cluster1.gossip_listen_addr.to_string();
-        let cluster2 = create_cluster_for_test(vec![node_1.clone()], &[], &transport).await?;
-        let cluster3 = create_cluster_for_test(vec![node_1], &[], &transport).await?;
+        let cluster2 = create_cluster_for_test(vec![node_1.clone()], &[], &transport, true).await?;
+        let cluster3 = create_cluster_for_test(vec![node_1], &[], &transport, true).await?;
 
         let wait_secs = Duration::from_secs(30);
 
@@ -539,7 +630,7 @@ mod tests {
         let members: Vec<SocketAddr> = cluster1
             .members()
             .iter()
-            .map(|member| member.gossip_public_address)
+            .map(|member| member.gossip_advertise_addr)
             .sorted()
             .collect();
         let mut expected_members = vec![
@@ -575,6 +666,7 @@ mod tests {
             Vec::new(),
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
         let cluster2a = create_cluster_for_test_with_id(
@@ -583,6 +675,7 @@ mod tests {
             vec![cluster1a.gossip_listen_addr.to_string()],
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
         let cluster1b = create_cluster_for_test_with_id(
@@ -594,6 +687,7 @@ mod tests {
             ],
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
         let cluster2b = create_cluster_for_test_with_id(
@@ -605,6 +699,7 @@ mod tests {
             ],
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
 
@@ -620,7 +715,7 @@ mod tests {
         let members_a: Vec<SocketAddr> = cluster1a
             .members()
             .iter()
-            .map(|member| member.gossip_public_address)
+            .map(|member| member.gossip_advertise_addr)
             .sorted()
             .collect();
         let mut expected_members_a =
@@ -631,7 +726,7 @@ mod tests {
         let members_b: Vec<SocketAddr> = cluster2a
             .members()
             .iter()
-            .map(|member| member.gossip_public_address)
+            .map(|member| member.gossip_advertise_addr)
             .sorted()
             .collect();
         let mut expected_members_b =
@@ -653,6 +748,7 @@ mod tests {
             Vec::new(),
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
         let node_1 = cluster1.gossip_listen_addr.to_string();
@@ -662,6 +758,7 @@ mod tests {
             vec![node_1.clone()],
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
 
@@ -676,7 +773,7 @@ mod tests {
         let members: Vec<SocketAddr> = cluster1
             .members()
             .iter()
-            .map(|member| member.gossip_public_address)
+            .map(|member| member.gossip_advertise_addr)
             .sorted()
             .collect();
         let mut expected_members = vec![cluster1.gossip_listen_addr, cluster2.gossip_listen_addr];
@@ -691,18 +788,23 @@ mod tests {
             .unwrap();
 
         let grpc_port = quickwit_common::net::find_available_tcp_port()?;
-        let grpc_addr = ([127, 0, 0, 1], grpc_port).into();
+        let grpc_addr: SocketAddr = ([127, 0, 0, 1], grpc_port).into();
         let cluster2 = Cluster::join(
-            Member::new("new_id".to_string(), 1, cluster2_listen_addr),
-            &HashSet::default(),
+            ClusterMember::new(
+                "new_id".to_string(),
+                1,
+                cluster2_listen_addr,
+                HashSet::default(),
+                grpc_addr,
+            ),
             cluster2_listen_addr,
             cluster_id.to_string(),
-            grpc_addr,
             vec![node_1],
             create_failure_detector_config_for_test(),
             &transport,
         )
         .await?;
+        cluster2.set_self_node_ready(true).await;
 
         for cluster in [cluster1, cluster2] {
             cluster
@@ -734,6 +836,7 @@ mod tests {
             Vec::new(),
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
         let node_1 = cluster1.gossip_listen_addr.to_string();
@@ -743,6 +846,7 @@ mod tests {
             vec![node_1.clone()],
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
         let node_2 = cluster2.gossip_listen_addr.to_string();
@@ -752,10 +856,11 @@ mod tests {
             vec![node_2],
             &HashSet::default(),
             &transport,
+            true,
         )
         .await?;
 
-        let wait_secs = Duration::from_secs(4);
+        let wait_secs = Duration::from_secs(5);
 
         for cluster in [&cluster1, &cluster2] {
             cluster
@@ -766,7 +871,7 @@ mod tests {
         let members: Vec<SocketAddr> = cluster1
             .members()
             .iter()
-            .map(|member| member.gossip_public_address)
+            .map(|member| member.gossip_advertise_addr)
             .sorted()
             .collect();
         let mut expected_members = vec![
@@ -787,31 +892,41 @@ mod tests {
             .unwrap();
 
         let grpc_port = quickwit_common::net::find_available_tcp_port()?;
-        let grpc_addr = ([127, 0, 0, 1], grpc_port).into();
+        let grpc_addr: SocketAddr = ([127, 0, 0, 1], grpc_port).into();
         let cluster2 = Cluster::join(
-            Member::new("new_node_2".to_string(), 1, cluster2_listen_addr),
-            &HashSet::default(),
+            ClusterMember::new(
+                "new_node_2".to_string(),
+                1,
+                cluster2_listen_addr,
+                HashSet::default(),
+                grpc_addr,
+            ),
             cluster2_listen_addr,
             cluster_id.to_string(),
-            grpc_addr,
             vec![node_1],
             create_failure_detector_config_for_test(),
             &transport,
         )
         .await?;
+        cluster2.set_self_node_ready(true).await;
         let node_2 = cluster2.gossip_listen_addr.to_string();
 
         let cluster3 = Cluster::join(
-            Member::new("new_node_3".to_string(), 1, cluster3_listen_addr),
-            &HashSet::default(),
+            ClusterMember::new(
+                "new_node_3".to_string(),
+                1,
+                cluster3_listen_addr,
+                HashSet::default(),
+                grpc_addr,
+            ),
             cluster3_listen_addr,
             cluster_id.to_string(),
-            grpc_addr,
             vec![node_2],
             create_failure_detector_config_for_test(),
             &transport,
         )
         .await?;
+        cluster3.set_self_node_ready(true).await;
 
         for cluster in [&cluster1, &cluster2, &cluster3] {
             cluster
@@ -833,6 +948,38 @@ mod tests {
                 .collect();
             assert_eq!(&member_ids, &expected_member_ids);
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_cluster_with_node_becoming_ready() -> anyhow::Result<()> {
+        quickwit_common::setup_logging_for_tests();
+        let transport = ChannelTransport::default();
+        let cluster1 =
+            create_cluster_for_test(Vec::new(), &["searcher", "indexer"], &transport, true).await?;
+        let node_1 = cluster1.gossip_listen_addr.to_string();
+        let cluster2 =
+            create_cluster_for_test(vec![node_1.clone()], &["indexer"], &transport, false).await?;
+        let wait_secs = Duration::from_secs(30);
+
+        // Cluster 2 sees 2 members: himself and node 1.
+        cluster2
+            .wait_for_members(|members| members.len() == 2, wait_secs)
+            .await
+            .unwrap();
+        // However cluster 1 sees only 1 member, himself.
+        cluster1
+            .wait_for_members(|members| members.len() == 1, wait_secs)
+            .await
+            .unwrap();
+        // Cluster2 now becomes ready.
+        cluster2.set_self_node_ready(true).await;
+        // And cluster1 now sees 2 members.
+        cluster1
+            .wait_for_members(|members| members.len() == 2, wait_secs)
+            .await
+            .unwrap();
+
         Ok(())
     }
 }

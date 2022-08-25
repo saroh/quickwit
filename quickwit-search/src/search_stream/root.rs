@@ -54,8 +54,8 @@ pub async fn root_search_stream(
         SearchError::InternalError(format!("Failed to build doc mapper. Cause: {}", err))
     })?;
 
-    // try to build query against current schema
-    let _query = doc_mapper.query(doc_mapper.schema(), &search_request)?;
+    // Validates the query by effectively building it against the current schema.
+    doc_mapper.query(doc_mapper.schema(), &search_request)?;
 
     let doc_mapper_str = serde_json::to_string(&doc_mapper).map_err(|err| {
         SearchError::InternalError(format!("Failed to serialize doc mapper: Cause {}", err))
@@ -118,6 +118,7 @@ mod tests {
             index_id: "test-index".to_string(),
             query: "test".to_string(),
             search_fields: vec!["body".to_string()],
+            snippet_fields: vec![],
             start_timestamp: None,
             end_timestamp: None,
             fast_field: "timestamp".to_string(),
@@ -175,6 +176,7 @@ mod tests {
             index_id: "test-index".to_string(),
             query: "test".to_string(),
             search_fields: vec!["body".to_string()],
+            snippet_fields: vec![],
             start_timestamp: None,
             end_timestamp: None,
             fast_field: "timestamp".to_string(),
@@ -228,6 +230,7 @@ mod tests {
             index_id: "test-index".to_string(),
             query: "test".to_string(),
             search_fields: vec!["body".to_string()],
+            snippet_fields: vec![],
             start_timestamp: None,
             end_timestamp: None,
             fast_field: "timestamp".to_string(),
@@ -307,6 +310,7 @@ mod tests {
                 index_id: "test-index".to_string(),
                 query: r#"invalid_field:"test""#.to_string(),
                 search_fields: vec!["body".to_string()],
+                snippet_fields: vec![],
                 start_timestamp: None,
                 end_timestamp: None,
                 fast_field: "timestamp".to_string(),
@@ -325,6 +329,7 @@ mod tests {
                 index_id: "test-index".to_string(),
                 query: "test".to_string(),
                 search_fields: vec!["invalid_field".to_string()],
+                snippet_fields: vec![],
                 start_timestamp: None,
                 end_timestamp: None,
                 fast_field: "timestamp".to_string(),

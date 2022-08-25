@@ -68,34 +68,34 @@ pub fn build_source_command<'a>() -> Command<'a> {
         .arg_required_else_help(true)
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct CreateSourceArgs {
     pub config_uri: Uri,
     pub index_id: String,
     pub source_config_uri: Uri,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct DeleteSourceArgs {
     pub config_uri: Uri,
     pub index_id: String,
     pub source_id: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct DescribeSourceArgs {
     pub config_uri: Uri,
     pub index_id: String,
     pub source_id: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct ListSourcesArgs {
     pub config_uri: Uri,
     pub index_id: String,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Eq, PartialEq)]
 pub enum SourceCliCommand {
     CreateSource(CreateSourceArgs),
     DeleteSource(DeleteSourceArgs),
@@ -490,6 +490,7 @@ mod tests {
             .collect();
         let sources = vec![SourceConfig {
             source_id: "foo-source".to_string(),
+            num_pipelines: 1,
             source_params: SourceParams::file("path/to/file"),
         }];
         let expected_source = vec![SourceRow {
@@ -552,10 +553,12 @@ mod tests {
         let sources = [
             SourceConfig {
                 source_id: "foo-source".to_string(),
+                num_pipelines: 1,
                 source_params: SourceParams::stdin(),
             },
             SourceConfig {
                 source_id: "bar-source".to_string(),
+                num_pipelines: 1,
                 source_params: SourceParams::stdin(),
             },
         ];

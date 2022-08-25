@@ -20,6 +20,7 @@
 use std::collections::BTreeSet;
 use std::fmt::Display;
 
+use serde::{Deserialize, Serialize};
 use tantivy::query::QueryParserError as TantivyQueryParserError;
 use tantivy_query_grammar::{Occur, UserInputAst, UserInputLeaf, UserInputLiteral};
 
@@ -52,7 +53,7 @@ pub fn extract_tags_from_query(user_query: &str) -> Result<Option<TagFilterAst>,
 
 /// Intermediary AST that may contain leaf that are
 /// equivalent to the "Uninformative" predicate.
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum UnsimplifiedTagFilterAst {
     And(Vec<UnsimplifiedTagFilterAst>),
     Or(Vec<UnsimplifiedTagFilterAst>),
@@ -97,7 +98,7 @@ pub fn append_to_tag_set(field_name: &str, values: &[String], tag_set: &mut BTre
 
 /// Represents a predicate over the set of tags associated with a given split.
 #[allow(missing_docs)]
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Debug, PartialEq, Clone, Serialize, Deserialize)]
 pub enum TagFilterAst {
     And(Vec<TagFilterAst>),
     Or(Vec<TagFilterAst>),

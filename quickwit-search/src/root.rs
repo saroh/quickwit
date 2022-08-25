@@ -109,7 +109,7 @@ impl From<FetchDocsJob> for SplitIdAndFooterOffsets {
     }
 }
 
-fn validate_request(search_request: &SearchRequest) -> crate::Result<()> {
+pub(crate) fn validate_request(search_request: &SearchRequest) -> crate::Result<()> {
     if let Some(agg) = search_request.aggregation_request.as_ref() {
         let _agg: Aggregations = serde_json::from_str(agg)
             .map_err(|err| SearchError::InvalidAggregationRequest(err.to_string()))?;
@@ -159,8 +159,8 @@ pub async fn root_search(
 
     validate_request(search_request)?;
 
-    // try to build query against current schema
-    let _query = doc_mapper.query(doc_mapper.schema(), search_request)?;
+    // Validates the query by effectively building it against the current schema.
+    doc_mapper.query(doc_mapper.schema(), search_request)?;
 
     let doc_mapper_str = serde_json::to_string(&doc_mapper).map_err(|err| {
         SearchError::InternalError(format!("Failed to serialize doc mapper: Cause {}", err))
@@ -244,11 +244,25 @@ pub async fn root_search(
                     .into_iter()
                     .map(|fetch_doc_job| fetch_doc_job.into())
                     .collect();
-                let fetch_docs_req = FetchDocsRequest {
-                    partial_hits,
-                    index_id: search_request.index_id.to_string(),
-                    split_offsets,
-                    index_uri: index_metadata.index_uri.to_string(),
+
+                let fetch_docs_req = if search_request.snippet_fields.is_empty() {
+                    FetchDocsRequest {
+                        partial_hits,
+                        index_id: search_request.index_id.to_string(),
+                        split_offsets,
+                        index_uri: index_metadata.index_uri.to_string(),
+                        search_request: None,
+                        doc_mapper: None,
+                    }
+                } else {
+                    FetchDocsRequest {
+                        partial_hits,
+                        index_id: search_request.index_id.to_string(),
+                        split_offsets,
+                        index_uri: index_metadata.index_uri.to_string(),
+                        search_request: Some(search_request.clone()),
+                        doc_mapper: Some(doc_mapper_str.clone()),
+                    }
                 };
                 cluster_client.fetch_docs(fetch_docs_req, client)
             });
@@ -394,6 +408,7 @@ mod tests {
                 }))
                 .expect("Json serialization should not fail"),
                 partial_hit: Some(req),
+                leaf_snippet_json: None,
             })
             .collect()
     }

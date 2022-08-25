@@ -36,7 +36,7 @@ use crate::default_doc_mapper::field_mapping_entry::{
 use crate::default_doc_mapper::{FieldMappingType, QuickwitJsonOptions};
 use crate::{DocParsingError, FieldMappingEntry, ModeType};
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum JsonType {
     Null,
     Bool,
@@ -932,8 +932,8 @@ mod tests {
             .unwrap();
         assert_eq!(
             parse_err.to_string(),
-            "The field 'root.my_field' could not be parsed: Expected JSON number, got \
-             'Array([Number(1), Number(2)])'."
+            "The field 'root.my_field' could not be parsed: Expected JSON number, got 'Array \
+             [Number(1), Number(2)]'."
         );
     }
 

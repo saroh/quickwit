@@ -20,7 +20,7 @@
 use anyhow::{bail, Context};
 use quickwit_proto::SearchRequest;
 use serde::{Deserialize, Serialize};
-use tantivy::schema::{FieldType, Schema};
+use tantivy::schema::{Field, FieldType, Schema};
 use tantivy::Order as TantivyOrder;
 
 // TODO: Move to `quickwit-config` when `quickwit-config` no longer depends on
@@ -28,7 +28,7 @@ use tantivy::Order as TantivyOrder;
 
 /// Sort order, either ascending or descending.
 /// Use `SortOrder::Desc` for top-k queries.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SortOrder {
     /// Ascending order.
@@ -55,7 +55,7 @@ impl From<SortOrder> for TantivyOrder {
 /// Specifies how documents are sorted.
 /// In case of a tie, the documents are ordered according to descending `(split_id, segment_ord,
 /// doc_id)`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SortByField {
     /// Name of the field to sort by.
     pub field_name: String,
@@ -79,7 +79,7 @@ impl From<String> for SortByField {
 /// Specifies how documents are sorted.
 /// In case of a tie, the documents are ordered according to descending `(split_id, segment_ord,
 /// doc_id)`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum SortBy {
     /// Sort by document ID.
     DocId,
@@ -97,9 +97,13 @@ pub enum SortBy {
     },
 }
 
-pub(crate) fn validate_sort_by_field_name(field_name: &str, schema: &Schema) -> anyhow::Result<()> {
+pub(crate) fn validate_sort_by_field_name(
+    field_name: &str,
+    schema: &Schema,
+    search_fields_opt: Option<&Vec<Field>>,
+) -> anyhow::Result<()> {
     if field_name == "_score" {
-        return Ok(());
+        return validate_sort_by_score(schema, search_fields_opt);
     }
     let sort_by_field = schema
         .get_field(field_name)
@@ -119,6 +123,24 @@ pub(crate) fn validate_sort_by_field_name(field_name: &str, schema: &Schema) -> 
         )
     }
 
+    Ok(())
+}
+
+fn validate_sort_by_score(
+    schema: &Schema,
+    search_fields_opt: Option<&Vec<Field>>,
+) -> anyhow::Result<()> {
+    if let Some(fields) = search_fields_opt {
+        for field in fields {
+            if !schema.get_field_entry(*field).has_fieldnorms() {
+                bail!(
+                    "Fieldnorms for field `{}` is missing. Fieldnorms must be stored for the \
+                     field to compute the BM25 score of the documents.",
+                    schema.get_field_name(*field)
+                )
+            }
+        }
+    }
     Ok(())
 }
 

@@ -17,6 +17,10 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-fn main() {
-    build_data::set_RUST_CHANNEL();
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub struct IndexingPipelineId {
+    pub index_id: String,
+    pub source_id: String,
+    pub node_id: String,
+    pub pipeline_ord: usize,
 }

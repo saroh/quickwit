@@ -42,19 +42,21 @@ mod metrics;
 mod tests;
 
 use metrics::SEARCH_METRICS;
+use quickwit_common::extract_time_range;
+use root::validate_request;
+use service::SearcherContext;
 
 /// Refer to this as `crate::Result<T>`.
 pub type Result<T> = std::result::Result<T, SearchError>;
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
-use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::Context;
 use itertools::Itertools;
 use quickwit_cluster::Cluster;
-use quickwit_config::{build_doc_mapper, QuickwitConfig, SEARCHER_CONFIG_INSTANCE};
+use quickwit_config::{build_doc_mapper, QuickwitConfig, SearcherConfig};
 use quickwit_doc_mapper::tag_pruning::extract_tags_from_query;
 use quickwit_doc_mapper::DocMapper;
 use quickwit_metastore::{Metastore, SplitMetadata, SplitState};
@@ -72,7 +74,7 @@ pub use crate::error::{parse_grpc_error, SearchError};
 use crate::fetch_docs::fetch_docs;
 use crate::leaf::leaf_search;
 pub use crate::root::root_search;
-pub use crate::search_client_pool::SearchClientPool;
+pub use crate::search_client_pool::{create_search_service_client, SearchClientPool};
 pub use crate::search_response_rest::SearchResponseRest;
 pub use crate::search_stream::root_search_stream;
 pub use crate::service::{MockSearchService, SearchService, SearchServiceImpl};
@@ -102,27 +104,6 @@ fn partial_hit_sorting_key(partial_hit: &PartialHit) -> (Reverse<u64>, GlobalDoc
         Reverse(partial_hit.sorting_field_value),
         GlobalDocAddress::from_partial_hit(partial_hit),
     )
-}
-
-fn extract_time_range(
-    start_timestamp_opt: Option<i64>,
-    end_timestamp_opt: Option<i64>,
-) -> Option<Range<i64>> {
-    match (start_timestamp_opt, end_timestamp_opt) {
-        (Some(start_timestamp), Some(end_timestamp)) => Some(Range {
-            start: start_timestamp,
-            end: end_timestamp,
-        }),
-        (_, Some(end_timestamp)) => Some(Range {
-            start: i64::MIN,
-            end: end_timestamp,
-        }),
-        (Some(start_timestamp), _) => Some(Range {
-            start: start_timestamp,
-            end: i64::MAX,
-        }),
-        _ => None,
-    }
 }
 
 fn extract_split_and_footer_offsets(split_metadata: &SplitMetadata) -> SplitIdAndFooterOffsets {
@@ -181,6 +162,7 @@ fn convert_leaf_hit(
     Ok(quickwit_proto::Hit {
         json,
         partial_hit: leaf_hit.partial_hit,
+        snippet: leaf_hit.leaf_snippet_json,
     })
 }
 
@@ -205,7 +187,14 @@ pub async fn single_node_search(
     .map_err(|err| {
         SearchError::InternalError(format!("Failed to build doc mapper. Cause: {}", err))
     })?;
+
+    validate_request(search_request)?;
+
+    // Validates the query by effectively building it against the current schema.
+    doc_mapper.query(doc_mapper.schema(), search_request)?;
+    let searcher_context = Arc::new(SearcherContext::new(SearcherConfig::default()));
     let leaf_search_response = leaf_search(
+        searcher_context.clone(),
         search_request,
         index_storage.clone(),
         &split_metadata[..],
@@ -213,10 +202,25 @@ pub async fn single_node_search(
     )
     .await
     .context("Failed to perform leaf search.")?;
+
+    let doc_mapper_opt = if !search_request.snippet_fields.is_empty() {
+        Some(doc_mapper.clone())
+    } else {
+        None
+    };
+    let search_request_opt = if !search_request.snippet_fields.is_empty() {
+        Some(search_request)
+    } else {
+        None
+    };
+
     let fetch_docs_response = fetch_docs(
+        searcher_context.clone(),
         leaf_search_response.partial_hits,
         index_storage,
         &split_metadata,
+        doc_mapper_opt,
+        search_request_opt,
     )
     .await
     .context("Failed to perform fetch docs.")?;
@@ -257,16 +261,18 @@ pub async fn start_searcher_service(
     storage_uri_resolver: StorageUriResolver,
     cluster: Arc<Cluster>,
 ) -> anyhow::Result<Arc<dyn SearchService>> {
-    SEARCHER_CONFIG_INSTANCE
-        .set(quickwit_config.searcher_config.clone())
-        .expect("could not set searcher config in global once cell");
-    let client_pool = SearchClientPool::create_and_keep_updated(cluster).await?;
+    let client_pool = SearchClientPool::create_and_keep_updated(
+        &cluster.members(),
+        cluster.member_change_watcher(),
+    )
+    .await?;
     let cluster_client = ClusterClient::new(client_pool.clone());
     let search_service = Arc::new(SearchServiceImpl::new(
         metastore,
         storage_uri_resolver,
         cluster_client,
         client_pool,
+        quickwit_config.searcher_config.clone(),
     ));
     Ok(search_service)
 }

@@ -30,9 +30,25 @@ use crate::{is_false, validate_identifier};
 /// Reserved source ID for the `quickwit index ingest` CLI command.
 pub const CLI_INGEST_SOURCE_ID: &str = ".cli-ingest-source";
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+fn default_num_pipelines() -> usize {
+    1
+}
+
+fn is_one(num: &usize) -> bool {
+    *num == 1
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceConfig {
     pub source_id: String,
+
+    #[doc(hidden)]
+    #[serde(default = "default_num_pipelines", skip_serializing_if = "is_one")]
+    /// Number of indexing pipelines spawned for the source on each indexer.
+    /// Therefore, if there exists `n` indexers in the cluster, there will be `n` * `num_pipelines`
+    /// indexing pipelines running for the source.
+    pub num_pipelines: usize,
+
     #[serde(flatten)]
     pub source_params: SourceParams,
 }
@@ -135,9 +151,16 @@ impl SourceConfig {
         }
         .unwrap()
     }
+
+    pub fn num_pipelines(&self) -> Option<usize> {
+        match &self.source_params {
+            SourceParams::Kafka(_) | SourceParams::Void(_) => Some(self.num_pipelines),
+            _ => None,
+        }
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "source_type", content = "params")]
 pub enum SourceParams {
     #[serde(rename = "file")]
@@ -168,7 +191,7 @@ impl SourceParams {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FileSourceParams {
     /// Path of the file to read. Assume stdin if None.
@@ -202,7 +225,7 @@ impl FileSourceParams {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct KafkaSourceParams {
     /// Name of the topic that the source consumes.
@@ -216,14 +239,14 @@ pub struct KafkaSourceParams {
     pub client_params: serde_json::Value,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RegionOrEndpoint {
     Region(String),
     Endpoint(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "KinesisSourceParamsInner")]
 pub struct KinesisSourceParams {
     pub stream_name: String,
@@ -234,7 +257,7 @@ pub struct KinesisSourceParams {
     pub shutdown_at_stream_eof: bool,
 }
 
-#[derive(Clone, Debug, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KinesisSourceParamsInner {
     pub stream_name: String,
@@ -266,25 +289,26 @@ impl TryFrom<KinesisSourceParamsInner> for KinesisSourceParams {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VecSourceParams {
-    pub items: Vec<String>,
+    pub docs: Vec<String>,
     pub batch_num_docs: usize,
     #[serde(default)]
     pub partition: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct VoidSourceParams;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IngestApiSourceParams {
     pub index_id: String,
+    pub queues_dir_path: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batch_num_bytes_threshold: Option<u64>,
+    pub batch_num_bytes_limit: Option<u64>,
 }
 
 #[cfg(test)]
@@ -314,6 +338,7 @@ mod tests {
             .unwrap();
         let expected_source_config = SourceConfig {
             source_id: "hdfs-logs-kafka-source".to_string(),
+            num_pipelines: 2,
             source_params: SourceParams::Kafka(KafkaSourceParams {
                 topic: "cloudera-cluster-logs".to_string(),
                 client_log_level: None,
@@ -321,6 +346,7 @@ mod tests {
             }),
         };
         assert_eq!(source_config, expected_source_config);
+        assert_eq!(source_config.num_pipelines().unwrap(), 2);
     }
 
     #[tokio::test]
@@ -333,6 +359,7 @@ mod tests {
             .unwrap();
         let expected_source_config = SourceConfig {
             source_id: "hdfs-logs-kinesis-source".to_string(),
+            num_pipelines: 1,
             source_params: SourceParams::Kinesis(KinesisSourceParams {
                 stream_name: "emr-cluster-logs".to_string(),
                 region_or_endpoint: None,
@@ -340,6 +367,7 @@ mod tests {
             }),
         };
         assert_eq!(source_config, expected_source_config);
+        assert!(source_config.num_pipelines().is_none());
     }
 
     #[test]
@@ -449,10 +477,15 @@ mod tests {
     fn test_ingest_api_source_params_serialization() {
         let yaml = r#"
             index_id: wikipedia
-            batch_num_bytes_threshold: 200000
+            batch_num_bytes_limit: 200000
+            queues_dir_path: ./qwdata/queues
         "#;
         let ingest_api_params = serde_yaml::from_str::<IngestApiSourceParams>(yaml).unwrap();
         assert_eq!(ingest_api_params.index_id, "wikipedia");
-        assert_eq!(ingest_api_params.batch_num_bytes_threshold, Some(200000))
+        assert_eq!(ingest_api_params.batch_num_bytes_limit, Some(200000));
+        assert_eq!(
+            ingest_api_params.queues_dir_path,
+            Path::new("./qwdata/queues")
+        )
     }
 }
