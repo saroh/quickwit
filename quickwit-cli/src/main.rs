@@ -212,21 +212,63 @@ mod tests {
 
     use quickwit_cli::cli::{build_cli, CliCommand};
     use quickwit_cli::index::{
-        CreateIndexArgs, DeleteIndexArgs, DescribeIndexArgs, GarbageCollectIndexArgs,
-        IndexCliCommand, IngestDocsArgs, MergeOrDemuxArgs, SearchIndexArgs,
+        ClearIndexArgs, CreateIndexArgs, DeleteIndexArgs, DescribeIndexArgs,
+        GarbageCollectIndexArgs, IndexCliCommand, IngestDocsArgs, MergeArgs, SearchIndexArgs,
     };
     use quickwit_cli::split::{DescribeSplitArgs, ExtractSplitArgs, SplitCliCommand};
     use quickwit_common::uri::Uri;
 
     #[test]
+    fn test_parse_clear_args() {
+        let app = build_cli().no_binary_name(true);
+        let matches = app
+            .try_get_matches_from(&[
+                "index",
+                "clear",
+                "--index",
+                "wikipedia",
+                "--config",
+                "/config.yaml",
+            ])
+            .unwrap();
+        let command = CliCommand::parse_cli_args(&matches).unwrap();
+        let expected_cmd = CliCommand::Index(IndexCliCommand::Clear(ClearIndexArgs {
+            config_uri: Uri::try_new("file:///config.yaml").unwrap(),
+            index_id: "wikipedia".to_string(),
+            yes: false,
+        }));
+        assert_eq!(command, expected_cmd);
+
+        let app = build_cli().no_binary_name(true);
+        let matches = app
+            .try_get_matches_from(&[
+                "index",
+                "clear",
+                "--index",
+                "wikipedia",
+                "--config",
+                "/config.yaml",
+                "--yes",
+            ])
+            .unwrap();
+        let command = CliCommand::parse_cli_args(&matches).unwrap();
+        let expected_cmd = CliCommand::Index(IndexCliCommand::Clear(ClearIndexArgs {
+            config_uri: Uri::try_new("file:///config.yaml").unwrap(),
+            index_id: "wikipedia".to_string(),
+            yes: true,
+        }));
+        assert_eq!(command, expected_cmd);
+    }
+
+    #[test]
     fn test_parse_create_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
         let _ = app
-            .try_get_matches_from(vec!["new", "--index-uri", "file:///indexes/wikipedia"])
+            .try_get_matches_from(&["new", "--index-uri", "file:///indexes/wikipedia"])
             .unwrap_err();
 
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "create",
             "--index-config",
@@ -249,7 +291,7 @@ mod tests {
         assert_eq!(command, expected_cmd);
 
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "create",
             "--index-config",
@@ -273,7 +315,7 @@ mod tests {
     #[test]
     fn test_parse_ingest_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "ingest",
             "--index",
@@ -297,7 +339,7 @@ mod tests {
         ));
 
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "ingest",
             "--index",
@@ -327,7 +369,7 @@ mod tests {
     #[test]
     fn test_parse_search_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "search",
             "--index",
@@ -355,7 +397,7 @@ mod tests {
         ));
 
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "search",
             "--index",
@@ -406,7 +448,7 @@ mod tests {
     #[test]
     fn test_parse_delete_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "delete",
             "--index",
@@ -425,7 +467,7 @@ mod tests {
         ));
 
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "delete",
             "--index",
@@ -449,7 +491,7 @@ mod tests {
     #[test]
     fn test_parse_garbage_collect_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "gc",
             "--index",
@@ -469,7 +511,7 @@ mod tests {
         ));
 
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "gc",
             "--index",
@@ -498,7 +540,7 @@ mod tests {
     #[test]
     fn test_parse_merge_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "merge",
             "--index",
@@ -509,29 +551,7 @@ mod tests {
         let command = CliCommand::parse_cli_args(&matches)?;
         assert!(matches!(
             command,
-            CliCommand::Index(IndexCliCommand::Merge(MergeOrDemuxArgs {
-                index_id,
-                ..
-            })) if &index_id == "wikipedia"
-        ));
-        Ok(())
-    }
-
-    #[test]
-    fn test_parse_demux_args() -> anyhow::Result<()> {
-        let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
-            "index",
-            "demux",
-            "--index",
-            "wikipedia",
-            "--config",
-            "quickwit.yaml",
-        ])?;
-        let command = CliCommand::parse_cli_args(&matches)?;
-        assert!(matches!(
-            command,
-            CliCommand::Index(IndexCliCommand::Demux(MergeOrDemuxArgs {
+            CliCommand::Index(IndexCliCommand::Merge(MergeArgs {
                 index_id,
                 ..
             })) if &index_id == "wikipedia"
@@ -542,7 +562,7 @@ mod tests {
     #[test]
     fn test_parse_describe_index_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "index",
             "describe",
             "--index",
@@ -564,7 +584,7 @@ mod tests {
     #[test]
     fn test_parse_split_describe_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "split",
             "describe",
             "--index",
@@ -590,7 +610,7 @@ mod tests {
     #[test]
     fn test_parse_split_extract_args() -> anyhow::Result<()> {
         let app = build_cli().no_binary_name(true);
-        let matches = app.try_get_matches_from(vec![
+        let matches = app.try_get_matches_from(&[
             "split",
             "extract",
             "--index",

@@ -106,9 +106,6 @@ pub struct SplitMetadata {
     /// [`MAX_VALUES_PER_TAG_FIELD`]: https://github.com/quickwit-oss/quickwit/blob/main/quickwit-indexing/src/actors/packager.rs#L36
     pub tags: BTreeSet<String>,
 
-    /// Number of demux operations this split has undergone.
-    pub demux_num_ops: usize,
-
     /// Contains the range of bytes of the footer that needs to be downloaded
     /// in order to open a split.
     ///
@@ -140,6 +137,15 @@ impl SplitMetadata {
     /// Returns the split_id.
     pub fn split_id(&self) -> &str {
         &self.split_id
+    }
+
+    #[cfg(any(test, feature = "testsuite"))]
+    /// Returns an instance of `SplitMetadata` for testing.
+    pub fn for_test(split_id: String) -> Self {
+        Self {
+            split_id,
+            ..Default::default()
+        }
     }
 }
 
