@@ -61,7 +61,7 @@ tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["full"] }
 toml = "0.5.8"
 tracing = "0.1.29"
-tracing-opentelemetry = "0.17"
+tracing-opentelemetry = "0.18"
 tracing-subscriber = { version = "0.3", features = [
   "time",
   "std",
