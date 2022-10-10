@@ -1,0 +1,56 @@
+[package]
+name = "quickwit-metastore"
+version = "0.3.1"
+authors = ["Quickwit, Inc. <hello@quickwit.io>"]
+edition = "2021"
+license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
+description = "Quickwit's metastore"
+repository = "https://github.com/quickwit-oss/quickwit"
+homepage = "https://quickwit.io/"
+documentation = "https://quickwit.io/docs/"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+byte-unit = { workspace = true }
+sqlx = { workspace = true, optional = true }
+futures = { workspace = true }
+http = { workspace = true }
+itertools = { workspace = true }
+mockall = { workspace = true, optional = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true, optional = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tower = { workspace = true }
+tracing = { workspace = true }
+
+quickwit-cluster = { workspace = true }
+quickwit-common = { workspace = true }
+quickwit-config = { workspace = true }
+quickwit-doc-mapper = { workspace = true }
+quickwit-proto = { workspace = true }
+quickwit-storage = { workspace = true }
+
+[dev-dependencies]
+dotenv = { workspace = true }
+futures = { workspace = true }
+md5 = { workspace = true }
+mockall = { workspace = true }
+rand = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+quickwit-config = { workspace = true, features = ["testsuite"] }
+quickwit-doc-mapper = { workspace = true, features = ["testsuite"] }
+quickwit-storage = { workspace = true, features = ["testsuite"] }
+
+[features]
+testsuite = ["mockall", "tempfile"]
+ci-test = []
+postgres = ["sqlx"]
+azure = ["quickwit-storage/azure"]

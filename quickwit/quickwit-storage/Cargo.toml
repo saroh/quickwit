@@ -1,0 +1,59 @@
+[package]
+name = "quickwit-storage"
+version = "0.3.1"
+authors = ["Quickwit, Inc. <hello@quickwit.io>"]
+edition = "2021"
+license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
+description = "Quickwit's storage abstraction"
+repository = "https://github.com/quickwit-oss/quickwit"
+homepage = "https://quickwit.io/"
+documentation = "https://quickwit.io/docs/"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+base64 = { workspace = true }
+bytes = { workspace = true }
+fnv = { workspace = true }
+futures = { workspace = true }
+lru = { workspace = true }
+md5 = { workspace = true }
+mockall = { workspace = true, optional = true }
+once_cell = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+rusoto_core = { workspace = true }
+rusoto_s3 = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tantivy = { workspace = true }
+tempfile = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+tokio-stream = { workspace = true }
+azure_core = { workspace = true, optional = true }
+azure_storage = { workspace = true, optional = true }
+azure_storage_blobs = { workspace = true, optional = true }
+
+
+quickwit-aws = { workspace = true }
+quickwit-common = { workspace = true }
+quickwit-config = { workspace = true }
+
+[dev-dependencies]
+mockall = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+testsuite = [
+  "mockall",
+  "azure",
+  "azure_core/azurite_workaround",
+  "azure_storage/azurite_workaround",
+  "azure_storage_blobs/azurite_workaround",
+]
+ci-test = []
+azure = ["azure_core", "azure_storage", "azure_storage_blobs"]

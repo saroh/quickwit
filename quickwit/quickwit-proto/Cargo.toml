@@ -1,0 +1,21 @@
+[package]
+name = "quickwit-proto"
+version = "0.3.1"
+authors = ["Quickwit, Inc. <hello@quickwit.io>"]
+edition = "2021"
+license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
+description = "Quickwit's protos"
+repository = "https://github.com/quickwit-oss/quickwit"
+homepage = "https://quickwit.io/"
+documentation = "https://quickwit.io/docs/"
+
+[dependencies]
+prost = { workspace = true }
+prost-types = { workspace = true }
+serde = { workspace = true }
+tonic = { workspace = true }
+
+[build-dependencies]
+glob = "0.3.0"
+prost-build = { workspace = true }
+tonic-build = { workspace = true }

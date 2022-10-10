@@ -1,0 +1,38 @@
+[package]
+name = "quickwit-config"
+version = "0.3.1"
+authors = ["Quickwit, Inc. <hello@quickwit.io>"]
+edition = "2021"
+license = "AGPL-3.0-or-later"                           # For a commercial license, contact hello@quickwit.io
+description = "Quickwit configuration"
+repository = "https://github.com/quickwit-oss/quickwit"
+homepage = "https://quickwit.io/"
+documentation = "https://quickwit.io/docs/"
+
+[dependencies]
+anyhow = { workspace = true }
+byte-unit = { workspace = true }
+chrono = { workspace = true }
+cron = { workspace = true }
+derivative = { workspace = true }
+enum-iterator = { workspace = true }
+humantime = { workspace = true }
+itertools = { workspace = true }
+json_comments = { workspace = true }
+new_string_template = { workspace = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+toml = { workspace = true }
+tracing = { workspace = true }
+
+quickwit-common = { workspace = true }
+quickwit-doc-mapper = { workspace = true }
+
+[features]
+testsuite = []
+
+[dev-dependencies]
+tokio = { workspace = true }

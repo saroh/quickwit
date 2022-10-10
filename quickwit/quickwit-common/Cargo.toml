@@ -1,0 +1,34 @@
+[package]
+name = "quickwit-common"
+version = "0.3.1"
+authors = ["Quickwit, Inc. <hello@quickwit.io>"]
+edition = "2021"
+license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
+description = "Util crate of quickwit"
+repository = "https://github.com/quickwit-oss/quickwit"
+homepage = "https://quickwit.io/"
+documentation = "https://quickwit.io/docs/"
+
+[dependencies]
+anyhow = { workspace = true }
+colored = { workspace = true }
+env_logger = { workspace = true }
+home = { workspace = true }
+itertools = { workspace = true }
+num_cpus = { workspace = true }
+once_cell = { workspace = true }
+pnet = { workspace = true }
+prometheus = { workspace = true }
+rand = { workspace = true }
+regex = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+warp = { workspace = true }
+
+[features]
+testsuite = []
+
+[dev-dependencies]
+serde_json = { workspace = true }
+tempfile = { workspace = true }

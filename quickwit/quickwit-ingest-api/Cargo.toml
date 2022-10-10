@@ -1,0 +1,28 @@
+[package]
+name = "quickwit-ingest-api"
+version = "0.3.1"
+edition = "2021"
+license = "AGPL-3.0-or-later"                               # For a commercial, license, contact hello@quickwit.io
+description = "Quickwit is a cost-efficient search engine."
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+flume = { workspace = true }
+futures = { workspace = true }
+once_cell = { workspace = true }
+rocksdb = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+quickwit-actors = { workspace = true }
+quickwit-common = { workspace = true }
+quickwit-proto = { workspace = true }
+
+[dev-dependencies]
+rand = { workspace = true }
+rand_distr = { workspace = true }
+tempfile = { workspace = true }

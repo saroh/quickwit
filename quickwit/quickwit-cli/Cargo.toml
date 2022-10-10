@@ -1,0 +1,98 @@
+[package]
+name = "quickwit-cli"
+version = "0.3.1"
+authors = ["Quickwit, Inc. <hello@quickwit.io>"]
+edition = "2021"
+license = "AGPL-3.0-or-later"                               # For a commercial, license, contact hello@quickwit.io
+description = "Quickwit is a cost-efficient search engine."
+repository = "https://github.com/quickwit-oss/quickwit"
+homepage = "https://quickwit.io/"
+documentation = "https://quickwit.io/docs/"
+default-run = "quickwit"
+
+[[bin]]
+name = "quickwit"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate_markdown"
+path = "src/generate_markdown.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+atty = { workspace = true }
+byte-unit = { workspace = true }
+clap = { workspace = true }
+colored = { workspace = true }
+console-subscriber = { workspace = true, optional = true }
+dialoguer = { workspace = true }
+futures = { workspace = true }
+humansize = { workspace = true }
+humantime = { workspace = true }
+itertools = { workspace = true }
+once_cell = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-jaeger = { workspace = true }
+opentelemetry-otlp = { workspace = true }
+openssl-probe = { workspace = true, optional = true }
+regex = { workspace = true }
+serde_json = { workspace = true }
+tabled = { workspace = true }
+tempfile = { workspace = true }
+thousands = { workspace = true }
+tikv-jemalloc-ctl = { workspace = true, optional = true }
+tikv-jemallocator = { workspace = true, optional = true }
+time = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+toml = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+quickwit-actors = { workspace = true }
+quickwit-cluster = { workspace = true }
+quickwit-common = { workspace = true }
+quickwit-config = { workspace = true }
+quickwit-core = { workspace = true }
+quickwit-directories = { workspace = true }
+quickwit-doc-mapper = { workspace = true }
+quickwit-indexing = { workspace = true }
+quickwit-metastore = { workspace = true }
+quickwit-proto = { workspace = true }
+quickwit-search = { workspace = true }
+quickwit-serve = { workspace = true }
+quickwit-storage = { workspace = true }
+quickwit-telemetry = { workspace = true }
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+reqwest = { workspace = true }
+serial_test = { workspace = true }
+
+quickwit-metastore = { workspace = true, features = ["testsuite"] }
+
+[features]
+jemalloc = ["dep:tikv-jemalloc-ctl", "dep:tikv-jemallocator"]
+ci-test = []
+openssl-support = ["openssl-probe"]
+tokio-console = ["console-subscriber"]
+release-feature-set = [
+  "quickwit-metastore/postgres",
+  "quickwit-metastore/azure",
+  "quickwit-indexing/kafka",
+  "quickwit-indexing/kinesis",
+  "openssl-support",
+  "jemalloc",
+]
+release-feature-vendored-set = [
+  "quickwit-metastore/postgres",
+  "quickwit-metastore/azure",
+  "quickwit-indexing/vendored-kafka",
+  "quickwit-indexing/kinesis",
+  "openssl-support",
+  "jemalloc",
+]

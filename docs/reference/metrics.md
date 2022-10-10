@@ -40,8 +40,16 @@ Currently Quickwit exposes metrics for three caches: `fastfields`, `shortlived`,
 
 | Namespace | Metric Name | Description | Type |
 | --------- | ----------- | ----------- | ---- |
-| `cache_{cache_name}` | `in_cache_count` | Count of {cache_name} in cache | `gauge` |
-| `cache_{cache_name}` | `in_cache_num_bytes` | Number of {cache_name} bytes in cache | `gauge` |
-| `cache_{cache_name}` | `cache_hit_total` | Number of {cache_name} cache hits | `counter` |
-| `cache_{cache_name}` | `cache_hits_bytes` | Number of {cache_name} cache hits in bytes | `counter` |
-| `cache_{cache_name}` | `cache_miss_total` | Number of {cache_name} cache hits | `counter` |
+| `quickwit_cache_{cache_name}` | `in_cache_count` | Count of {cache_name} in cache | `gauge` |
+| `quickwit_cache_{cache_name}` | `in_cache_num_bytes` | Number of {cache_name} bytes in cache | `gauge` |
+| `quickwit_cache_{cache_name}` | `cache_hit_total` | Number of {cache_name} cache hits | `counter` |
+| `quickwit_cache_{cache_name}` | `cache_hits_bytes` | Number of {cache_name} cache hits in bytes | `counter` |
+| `quickwit_cache_{cache_name}` | `cache_miss_total` | Number of {cache_name} cache hits | `counter` |
+
+## Ingest Metrics
+
+| Namespace | Metric Name | Description | Type |
+| --------- | ----------- | ----------- | ---- |
+| `quickwit_ingest` | `ingested_num_bytes` | Total size of the docs ingested in bytes | `counter` |
+| `quickwit_ingest` | `ingested_num_docs` | Number of docs received to be ingested | `counter` |
+| `quickwit_ingest` | `queue_count` | Number of queues currently active | `counter` |
