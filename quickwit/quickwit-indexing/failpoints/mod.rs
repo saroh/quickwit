@@ -37,18 +37,20 @@
 
 use std::path::Path;
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use fail::FailScenario;
-use quickwit_actors::{create_test_mailbox, ActorExitStatus, Universe};
+use quickwit_actors::{ActorExitStatus, Universe};
+use quickwit_common::io::IoControls;
 use quickwit_common::rand::append_random_suffix;
 use quickwit_common::split_file;
 use quickwit_indexing::actors::MergeExecutor;
 use quickwit_indexing::merge_policy::MergeOperation;
 use quickwit_indexing::models::{IndexingPipelineId, MergeScratch, ScratchDirectory};
 use quickwit_indexing::{get_tantivy_directory_from_split_bundle, TestSandbox};
-use quickwit_metastore::{Split, SplitMetadata, SplitState};
-use tantivy::Directory;
+use quickwit_metastore::{ListSplitsQuery, Split, SplitMetadata, SplitState};
+use serde_json::Value as JsonValue;
+use tantivy::{Directory, Inventory};
 
 #[tokio::test]
 async fn test_failpoint_no_failure() -> anyhow::Result<()> {
@@ -159,36 +161,26 @@ async fn aux_test_failpoints() -> anyhow::Result<()> {
           - name: body
             type: text
           - name: ts
-            type: i64
+            type: datetime
             fast: true
-        "#;
-    let indexing_setting_yaml = r#"
         timestamp_field: ts
-    "#;
+        "#;
     let search_fields = ["body"];
     let index_id = append_random_suffix("test-index");
-    let test_index_builder = TestSandbox::create(
-        &index_id,
-        doc_mapper_yaml,
-        indexing_setting_yaml,
-        &search_fields,
-        None,
-    )
-    .await?;
-    let batch_1: Vec<serde_json::Value> = vec![
+    let test_index_builder =
+        TestSandbox::create(&index_id, doc_mapper_yaml, "", &search_fields).await?;
+    let batch_1: Vec<JsonValue> = vec![
         serde_json::json!({"body ": "1", "ts": 1629889530 }),
         serde_json::json!({"body ": "2", "ts": 1629889531 }),
     ];
-    let batch_2: Vec<serde_json::Value> = vec![
+    let batch_2: Vec<JsonValue> = vec![
         serde_json::json!({"body ": "3", "ts": 1629889532 }),
         serde_json::json!({"body ": "4", "ts": 1629889533 }),
     ];
     test_index_builder.add_documents(batch_1).await?;
     test_index_builder.add_documents(batch_2).await?;
-    let mut splits = test_index_builder
-        .metastore()
-        .list_splits(&index_id, SplitState::Published, None, None)
-        .await?;
+    let query = ListSplitsQuery::for_index(&index_id).with_split_state(SplitState::Published);
+    let mut splits = test_index_builder.metastore().list_splits(query).await?;
     splits.sort_by_key(|split| *split.split_metadata.time_range.clone().unwrap().start());
     assert_eq!(splits.len(), 2);
     assert_eq!(
@@ -224,36 +216,41 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
     // time to time a kill switch activation because the ControlledDirectory did not
     // do any write during a HEARTBEAT... Before removing the protect zone, we need
     // to investigate this instability. Then this test will finally be really helpful.
+    quickwit_common::setup_logging_for_tests();
+    let universe = Universe::with_accelerated_time();
     let doc_mapper_yaml = r#"
         field_mappings:
           - name: body
             type: text
           - name: ts
-            type: i64
+            type: datetime
             fast: true
+        timestamp_field: ts
         "#;
     let indexing_setting_yaml = r#"
-        timestamp_field: ts
         split_num_docs_target: 1000
+        merge_policy:
+          type: "no_merge" 
     "#;
     let search_fields = ["body"];
-    let index_id = "test-index";
+    let index_id = "test-index-merge-executory-kill-switch";
     let test_index_builder = TestSandbox::create(
         index_id,
         doc_mapper_yaml,
         indexing_setting_yaml,
         &search_fields,
-        None,
     )
     .await?;
 
-    let batch: Vec<serde_json::Value> =
+    let doc_mapper = test_index_builder.doc_mapper();
+    let batch: Vec<JsonValue> =
         std::iter::repeat_with(|| serde_json::json!({"body ": TEST_TEXT, "ts": 1631072713 }))
             .take(500)
             .collect();
     for _ in 0..2 {
         test_index_builder.add_documents(batch.clone()).await?;
     }
+    tokio::time::sleep(Duration::from_millis(10)).await;
 
     let metastore = test_index_builder.metastore();
     let splits: Vec<Split> = metastore.list_all_splits(index_id).await?;
@@ -261,7 +258,7 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
         .into_iter()
         .map(|split| split.split_metadata)
         .collect();
-    let merge_scratch_directory = ScratchDirectory::for_test()?;
+    let merge_scratch_directory = ScratchDirectory::for_test();
 
     let downloaded_splits_directory =
         merge_scratch_directory.named_temp_child("downloaded-splits-")?;
@@ -276,9 +273,11 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
 
         tantivy_dirs.push(get_tantivy_directory_from_split_bundle(&dest_filepath).unwrap());
     }
-
+    let merge_ops_inventory = Inventory::new();
+    let merge_operation =
+        merge_ops_inventory.track(MergeOperation::new_merge_operation(split_metadatas));
     let merge_scratch = MergeScratch {
-        merge_operation: MergeOperation::new_merge_operation(split_metadatas),
+        merge_operation,
         merge_scratch_directory,
         downloaded_splits_directory,
         tantivy_dirs,
@@ -289,9 +288,15 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
         node_id: "test-node".to_string(),
         pipeline_ord: 0,
     };
-    let (merge_packager_mailbox, _merge_packager_inbox) = create_test_mailbox();
-    let merge_executor = MergeExecutor::new(pipeline_id, metastore, merge_packager_mailbox);
-    let universe = Universe::new();
+    let (merge_packager_mailbox, _merge_packager_inbox) = universe.create_test_mailbox();
+    let io_controls = IoControls::default();
+    let merge_executor = MergeExecutor::new(
+        pipeline_id,
+        metastore,
+        doc_mapper,
+        io_controls,
+        merge_packager_mailbox,
+    );
     let (merge_executor_mailbox, merge_executor_handle) =
         universe.spawn_builder().spawn(merge_executor);
 
@@ -310,16 +315,12 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
     fail::cfg("before-merge-split", "pause").unwrap();
     merge_executor_mailbox.send_message(merge_scratch).await?;
 
-    std::mem::drop(merge_executor_mailbox);
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    tokio::time::sleep(Duration::from_millis(10)).await;
     universe.kill();
 
-    let start = Instant::now();
     fail::cfg("before-merge-split", "off").unwrap();
 
     let (exit_status, _) = merge_executor_handle.join().await;
-    assert!(start.elapsed() < Duration::from_millis(100));
     assert!(matches!(exit_status, ActorExitStatus::Failure(_)));
     Ok(())
 }

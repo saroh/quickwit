@@ -1,86 +1,93 @@
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct KeyValue {
-    #[prost(string, tag="1")]
+    #[prost(string, tag = "1")]
     pub key: ::prost::alloc::string::String,
-    #[prost(enumeration="ValueType", tag="2")]
+    #[prost(enumeration = "ValueType", tag = "2")]
     pub v_type: i32,
-    #[prost(string, tag="3")]
+    #[prost(string, tag = "3")]
     pub v_str: ::prost::alloc::string::String,
-    #[prost(bool, tag="4")]
+    #[prost(bool, tag = "4")]
     pub v_bool: bool,
-    #[prost(int64, tag="5")]
+    #[prost(int64, tag = "5")]
     pub v_int64: i64,
-    #[prost(double, tag="6")]
+    #[prost(double, tag = "6")]
     pub v_float64: f64,
-    #[prost(bytes="vec", tag="7")]
+    #[prost(bytes = "vec", tag = "7")]
     pub v_binary: ::prost::alloc::vec::Vec<u8>,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Log {
-    #[prost(message, optional, tag="1")]
+    #[prost(message, optional, tag = "1")]
     pub timestamp: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(message, repeated, tag="2")]
+    #[prost(message, repeated, tag = "2")]
     pub fields: ::prost::alloc::vec::Vec<KeyValue>,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SpanRef {
-    #[prost(bytes="vec", tag="1")]
+    #[prost(bytes = "vec", tag = "1")]
     pub trace_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes="vec", tag="2")]
+    #[prost(bytes = "vec", tag = "2")]
     pub span_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(enumeration="SpanRefType", tag="3")]
+    #[prost(enumeration = "SpanRefType", tag = "3")]
     pub ref_type: i32,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Process {
-    #[prost(string, tag="1")]
+    #[prost(string, tag = "1")]
     pub service_name: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="2")]
+    #[prost(message, repeated, tag = "2")]
     pub tags: ::prost::alloc::vec::Vec<KeyValue>,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Span {
-    #[prost(bytes="vec", tag="1")]
+    #[prost(bytes = "vec", tag = "1")]
     pub trace_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(bytes="vec", tag="2")]
+    #[prost(bytes = "vec", tag = "2")]
     pub span_id: ::prost::alloc::vec::Vec<u8>,
-    #[prost(string, tag="3")]
+    #[prost(string, tag = "3")]
     pub operation_name: ::prost::alloc::string::String,
-    #[prost(message, repeated, tag="4")]
+    #[prost(message, repeated, tag = "4")]
     pub references: ::prost::alloc::vec::Vec<SpanRef>,
-    #[prost(uint32, tag="5")]
+    #[prost(uint32, tag = "5")]
     pub flags: u32,
-    #[prost(message, optional, tag="6")]
+    #[prost(message, optional, tag = "6")]
     pub start_time: ::core::option::Option<::prost_types::Timestamp>,
-    #[prost(message, optional, tag="7")]
+    #[prost(message, optional, tag = "7")]
     pub duration: ::core::option::Option<::prost_types::Duration>,
-    #[prost(message, repeated, tag="8")]
+    #[prost(message, repeated, tag = "8")]
     pub tags: ::prost::alloc::vec::Vec<KeyValue>,
-    #[prost(message, repeated, tag="9")]
+    #[prost(message, repeated, tag = "9")]
     pub logs: ::prost::alloc::vec::Vec<Log>,
-    #[prost(message, optional, tag="10")]
+    #[prost(message, optional, tag = "10")]
     pub process: ::core::option::Option<Process>,
-    #[prost(string, tag="11")]
+    #[prost(string, tag = "11")]
     pub process_id: ::prost::alloc::string::String,
-    #[prost(string, repeated, tag="12")]
+    #[prost(string, repeated, tag = "12")]
     pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Trace {
-    #[prost(message, repeated, tag="1")]
+    #[prost(message, repeated, tag = "1")]
     pub spans: ::prost::alloc::vec::Vec<Span>,
-    #[prost(message, repeated, tag="2")]
+    #[prost(message, repeated, tag = "2")]
     pub process_map: ::prost::alloc::vec::Vec<trace::ProcessMapping>,
-    #[prost(string, repeated, tag="3")]
+    #[prost(string, repeated, tag = "3")]
     pub warnings: ::prost::alloc::vec::Vec<::prost::alloc::string::String>,
 }
 /// Nested message and enum types in `Trace`.
 pub mod trace {
+    #[allow(clippy::derive_partial_eq_without_eq)]
     #[derive(Clone, PartialEq, ::prost::Message)]
     pub struct ProcessMapping {
-        #[prost(string, tag="1")]
+        #[prost(string, tag = "1")]
         pub process_id: ::prost::alloc::string::String,
-        #[prost(message, optional, tag="2")]
+        #[prost(message, optional, tag = "2")]
         pub process: ::core::option::Option<super::Process>,
     }
 }
@@ -93,22 +100,24 @@ pub mod trace {
 /// semantics, both Batch and Spans in the same message may contain
 /// their own instances of Process, with span.Process taking priority
 /// over batch.Process.
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct Batch {
-    #[prost(message, repeated, tag="1")]
+    #[prost(message, repeated, tag = "1")]
     pub spans: ::prost::alloc::vec::Vec<Span>,
-    #[prost(message, optional, tag="2")]
+    #[prost(message, optional, tag = "2")]
     pub process: ::core::option::Option<Process>,
 }
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct DependencyLink {
-    #[prost(string, tag="1")]
+    #[prost(string, tag = "1")]
     pub parent: ::prost::alloc::string::String,
-    #[prost(string, tag="2")]
+    #[prost(string, tag = "2")]
     pub child: ::prost::alloc::string::String,
-    #[prost(uint64, tag="3")]
+    #[prost(uint64, tag = "3")]
     pub call_count: u64,
-    #[prost(string, tag="4")]
+    #[prost(string, tag = "4")]
     pub source: ::prost::alloc::string::String,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
@@ -134,6 +143,17 @@ impl ValueType {
             ValueType::Binary => "BINARY",
         }
     }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "STRING" => Some(Self::String),
+            "BOOL" => Some(Self::Bool),
+            "INT64" => Some(Self::Int64),
+            "FLOAT64" => Some(Self::Float64),
+            "BINARY" => Some(Self::Binary),
+            _ => None,
+        }
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, ::prost::Enumeration)]
 #[repr(i32)]
@@ -150,6 +170,14 @@ impl SpanRefType {
         match self {
             SpanRefType::ChildOf => "CHILD_OF",
             SpanRefType::FollowsFrom => "FOLLOWS_FROM",
+        }
+    }
+    /// Creates an enum from field names used in the ProtoBuf definition.
+    pub fn from_str_name(value: &str) -> ::core::option::Option<Self> {
+        match value {
+            "CHILD_OF" => Some(Self::ChildOf),
+            "FOLLOWS_FROM" => Some(Self::FollowsFrom),
+            _ => None,
         }
     }
 }

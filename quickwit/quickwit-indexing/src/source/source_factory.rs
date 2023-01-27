@@ -98,7 +98,6 @@ impl SourceLoader {
     ) -> Result<Box<dyn Source>, SourceLoaderError> {
         let source_type = ctx.source_config.source_type().to_string();
         let source_id = ctx.source_config.source_id.clone();
-
         let source_factory = self
             .type_to_factory
             .get(ctx.source_config.source_type())
@@ -134,9 +133,11 @@ mod tests {
         let source_loader = quickwit_supported_sources();
         let source_config = SourceConfig {
             source_id: "test-source".to_string(),
-            num_pipelines: 1,
+            desired_num_pipelines: 1,
+            max_num_pipelines_per_indexer: 1,
             enabled: true,
             source_params: SourceParams::void(),
+            transform_config: None,
         };
         source_loader
             .load_source(

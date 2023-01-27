@@ -21,6 +21,7 @@ use std::convert::TryFrom;
 
 use anyhow::bail;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use tantivy::schema::{
     Cardinality, IndexRecordOption, JsonObjectOptions, TextFieldIndexing, TextOptions, Type,
 };
@@ -49,25 +50,36 @@ pub struct FieldMappingEntry {
     pub mapping_type: FieldMappingType,
 }
 
-/// Struct used for serialization and deserialization
-/// Main advantage: having a flat structure and gain flexibility
-/// if we want to add some syntactic sugar in the mapping.
-/// Main drawback: we have a bunch of mixed parameters in it but
-/// seems to be reasonable.
+// Struct used for serialization and deserialization
+// Main advantage: having a flat structure and gain flexibility
+// if we want to add some syntactic sugar in the mapping.
+// Main drawback: we have a bunch of mixed parameters in it but
+// seems to be reasonable.
+//
+// We do not rely on enum with inline tagging and flatten because
+// - serde does not support it in combination with `deny_unknown_field`
+// - it is clumsy to handle `array<type>` keys.
+
+// Docs bellow used for OpenAPI generation:
+/// A `FieldMappingEntry` defines how a field is indexed, stored,
+/// and mapped from a JSON document to the related index fields.
 ///
-/// We do not rely on enum with inline tagging and flatten because
-/// - serde does not support it in combination with `deny_unknown_field`
-/// - it is clumsy to handle `array<type>` keys.
-#[derive(Clone, Serialize, Deserialize, Debug)]
-struct FieldMappingEntryForSerialization {
+/// Property parameters which defines the way the value must be indexed.
+///
+/// Properties are determined by the specified type, for more information
+/// please see: <https://quickwit.io/docs/configuration/index-config#field-types>
+#[derive(Clone, Serialize, Deserialize, Debug, utoipa::ToSchema)]
+pub(crate) struct FieldMappingEntryForSerialization {
+    /// Field name in the index schema.
     name: String,
     #[serde(rename = "type")]
     type_id: String,
     #[serde(flatten)]
-    pub field_mapping_json: serde_json::Map<String, serde_json::Value>,
+    #[schema(value_type = HashMap<String, Object>)]
+    pub field_mapping_json: serde_json::Map<String, JsonValue>,
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QuickwitNumericOptions {
     #[serde(default)]
@@ -92,7 +104,32 @@ impl Default for QuickwitNumericOptions {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct QuickwitIpAddrOptions {
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default = "default_as_true")]
+    pub stored: bool,
+    #[serde(default = "default_as_true")]
+    pub indexed: bool,
+    #[serde(default)]
+    pub fast: bool,
+}
+
+impl Default for QuickwitIpAddrOptions {
+    fn default() -> Self {
+        Self {
+            description: None,
+            indexed: true,
+            stored: true,
+            fast: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub enum QuickwitTextTokenizer {
     #[serde(rename = "raw")]
     Raw,
@@ -115,9 +152,10 @@ impl QuickwitTextTokenizer {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize, Debug)]
+#[derive(Clone, Serialize, Deserialize, Debug, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QuickwitTextOptions {
+    #[schema(value_type = String)]
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -126,6 +164,7 @@ pub struct QuickwitTextOptions {
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokenizer: Option<QuickwitTextTokenizer>,
+    #[schema(value_type = IndexRecordOptionSchema)]
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record: Option<IndexRecordOption>,
@@ -178,11 +217,27 @@ impl From<QuickwitTextOptions> for TextOptions {
     }
 }
 
+#[allow(unused)]
+#[derive(utoipa::ToSchema)]
+pub enum IndexRecordOptionSchema {
+    /// records only the `DocId`s
+    #[schema(rename = "basic")]
+    Basic,
+    /// records the document ids as well as the term frequency.
+    /// The term frequency can help giving better scoring of the documents.
+    #[schema(rename = "freq")]
+    WithFreqs,
+    /// records the document id, the term frequency and the positions of
+    /// the occurrences in the document.
+    #[schema(rename = "position")]
+    WithFreqsAndPositions,
+}
+
 /// Options associated to a json field.
 ///
 /// `QuickwitJsonOptions` is also used to configure
 /// the dynamic mapping.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct QuickwitJsonOptions {
     /// Optional description of JSON object.
@@ -201,12 +256,16 @@ pub struct QuickwitJsonOptions {
     /// with each token.
     ///
     /// Setting `record` is only allowed if indexed == true.
+    #[schema(value_type = IndexRecordOptionSchema)]
     #[serde(default)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub record: Option<IndexRecordOption>,
     /// If true, the field will be stored in the doc store.
     #[serde(default = "default_as_true")]
     pub stored: bool,
+    /// If true, the '.' in json keys will be expanded.
+    #[serde(default = "default_as_true")]
+    pub expand_dots: bool,
 }
 
 impl Default for QuickwitJsonOptions {
@@ -217,6 +276,7 @@ impl Default for QuickwitJsonOptions {
             tokenizer: None,
             record: None,
             stored: true,
+            expand_dots: true,
         }
     }
 }
@@ -239,13 +299,16 @@ impl From<QuickwitJsonOptions> for JsonObjectOptions {
                 .set_index_option(index_record_option);
             json_options = json_options.set_indexing_options(text_field_indexing);
         }
+        if quickwit_json_options.expand_dots {
+            json_options = json_options.set_expand_dots_enabled();
+        }
         json_options
     }
 }
 
 fn deserialize_mapping_type(
     quickwit_field_type: QuickwitFieldType,
-    json: serde_json::Value,
+    json: JsonValue,
 ) -> anyhow::Result<FieldMappingType> {
     let (typ, cardinality) = match quickwit_field_type {
         QuickwitFieldType::Simple(typ) => (typ, Cardinality::SingleValue),
@@ -291,6 +354,10 @@ fn deserialize_mapping_type(
             let numeric_options: QuickwitNumericOptions = serde_json::from_value(json)?;
             Ok(FieldMappingType::Bool(numeric_options, cardinality))
         }
+        Type::IpAddr => {
+            let ip_addr_options: QuickwitIpAddrOptions = serde_json::from_value(json)?;
+            Ok(FieldMappingType::IpAddr(ip_addr_options, cardinality))
+        }
         Type::Date => {
             let date_time_options = serde_json::from_value::<QuickwitDateTimeOptions>(json)?;
             Ok(FieldMappingType::DateTime(date_time_options, cardinality))
@@ -315,7 +382,6 @@ fn deserialize_mapping_type(
             }
             Ok(FieldMappingType::Json(json_options, cardinality))
         }
-        Type::IpAddr => unimplemented!("IpAddr are not supported in quickwit yet."),
     }
 }
 
@@ -333,7 +399,7 @@ impl TryFrom<FieldMappingEntryForSerialization> for FieldMappingEntry {
             })?;
         let mapping_type = deserialize_mapping_type(
             quickwit_field_type,
-            serde_json::Value::Object(value.field_mapping_json),
+            JsonValue::Object(value.field_mapping_json),
         )
         .map_err(|err| format!("Error while parsing field `{}`: {}", value.name, err))?;
         Ok(FieldMappingEntry {
@@ -344,9 +410,9 @@ impl TryFrom<FieldMappingEntryForSerialization> for FieldMappingEntry {
 }
 
 /// Serialize object into a `Map` of json values.
-fn serialize_to_map<S: Serialize>(val: &S) -> Option<serde_json::Map<String, serde_json::Value>> {
+fn serialize_to_map<S: Serialize>(val: &S) -> Option<serde_json::Map<String, JsonValue>> {
     let json_val = serde_json::to_value(val).ok()?;
-    if let serde_json::Value::Object(map) = json_val {
+    if let JsonValue::Object(map) = json_val {
         Some(map)
     } else {
         None
@@ -355,7 +421,7 @@ fn serialize_to_map<S: Serialize>(val: &S) -> Option<serde_json::Map<String, ser
 
 fn typed_mapping_to_json_params(
     field_mapping_type: FieldMappingType,
-) -> serde_json::Map<String, serde_json::Value> {
+) -> serde_json::Map<String, JsonValue> {
     match field_mapping_type {
         FieldMappingType::Text(text_options, _) => serialize_to_map(&text_options),
         FieldMappingType::U64(options, _)
@@ -363,6 +429,7 @@ fn typed_mapping_to_json_params(
         | FieldMappingType::Bytes(options, _)
         | FieldMappingType::F64(options, _)
         | FieldMappingType::Bool(options, _) => serialize_to_map(&options),
+        FieldMappingType::IpAddr(options, _) => serialize_to_map(&options),
         FieldMappingType::DateTime(date_time_options, _) => serialize_to_map(&date_time_options),
         FieldMappingType::Json(json_options, _) => serialize_to_map(&json_options),
         FieldMappingType::Object(object_options) => serialize_to_map(&object_options),
@@ -553,12 +620,10 @@ mod tests {
     "#,
         );
         assert!(mapping_entry.is_err());
-        assert_eq!(
-            mapping_entry.unwrap_err().to_string(),
-            "Error while parsing field `my_field_name`: unknown field `blub`, expected one of \
-             `description`, `indexed`, `tokenizer`, `record`, `stored`"
-                .to_string()
-        );
+        assert!(mapping_entry
+            .unwrap_err()
+            .to_string()
+            .contains("Error while parsing field `my_field_name`: unknown field `blub`"));
         Ok(())
     }
 
@@ -959,6 +1024,32 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ip_addr_mapping() {
+        let entry = serde_json::from_str::<FieldMappingEntry>(
+            r#"
+            {
+                "name": "ip_address",
+                "description": "Client IP address",
+                "type": "ip"
+            }
+            "#,
+        )
+        .unwrap();
+        let entry_str = serde_json::to_value(&entry).unwrap();
+        assert_eq!(
+            entry_str,
+            serde_json::json!({
+                "name": "ip_address",
+                "description": "Client IP address",
+                "type": "ip",
+                "stored": true,
+                "fast": false,
+                "indexed": true
+            })
+        );
+    }
+
+    #[test]
     fn test_parse_text_mapping() {
         let entry = serde_json::from_str::<FieldMappingEntry>(
             r#"
@@ -1026,6 +1117,7 @@ mod tests {
                 "name": "my_field_name",
                 "type": "datetime",
                 "input_formats": ["rfc3339", "unix_timestamp"],
+                "output_format": "rfc3339",
                 "precision": "seconds",
                 "stored": true,
                 "indexed": true,
@@ -1053,6 +1145,7 @@ mod tests {
                 "name": "my_field_name",
                 "type": "array<datetime>",
                 "input_formats": ["rfc3339", "unix_timestamp"],
+                "output_format": "rfc3339",
                 "precision": "milliseconds",
                 "stored": true,
                 "indexed": true,
@@ -1147,6 +1240,7 @@ mod tests {
             tokenizer: None,
             record: None,
             stored: true,
+            expand_dots: true,
         };
         assert_eq!(&field_mapping_entry.name, "my_json_field");
         assert!(
@@ -1186,6 +1280,7 @@ mod tests {
             tokenizer: Some(QuickwitTextTokenizer::Raw),
             record: None,
             stored: false,
+            expand_dots: true,
         };
         assert_eq!(&field_mapping_entry.name, "my_json_field_multi");
         assert!(
@@ -1266,7 +1361,8 @@ mod tests {
                 "description": "If you see this description, your test is failed",
                 "type": "json",
                 "stored": true,
-                "indexed": true
+                "indexed": true,
+                "expand_dots": true,
             })
         );
     }

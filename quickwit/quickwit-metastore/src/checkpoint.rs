@@ -266,7 +266,7 @@ impl<'de> Deserialize<'de> for SourceCheckpoint {
 /// Error returned when trying to apply a checkpoint delta to a checkpoint that is not
 /// compatible. ie: the checkpoint delta starts from a point anterior to
 /// the checkpoint.
-#[derive(Debug, Error, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Error, Eq, PartialEq, Serialize, Deserialize)]
 #[error(
     "IncompatibleChkptDelta at partition: {partition_id:?} cur_pos:{current_position:?} \
      delta_pos:{delta_position_from:?}"
@@ -299,9 +299,7 @@ impl SourceCheckpoint {
     ) -> Result<(), IncompatibleCheckpointDelta> {
         info!(delta=?delta, checkpoint=?self);
         for (delta_partition, delta_position) in &delta.per_partition {
-            let position = if let Some(position) = self.per_partition.get(delta_partition) {
-                position
-            } else {
+            let Some(position) = self.per_partition.get(delta_partition) else {
                 continue;
             };
             match position.cmp(&delta_position.from) {
@@ -443,12 +441,12 @@ impl From<Range<u64>> for SourceCheckpointDelta {
         let from_position = if range.start == 0 {
             Position::Beginning
         } else {
-            Position::from(range.start as u64 - 1)
+            Position::from(range.start - 1)
         };
         let to_position = if range.end == 0 {
             Position::Beginning
         } else {
-            Position::from(range.end as u64 - 1)
+            Position::from(range.end - 1)
         };
         SourceCheckpointDelta::from_partition_delta(
             PartitionId::default(),
@@ -527,6 +525,11 @@ impl SourceCheckpointDelta {
         self.per_partition.len()
     }
 
+    /// Returns an iterator over the partition_ids.
+    pub fn partitions(&self) -> impl Iterator<Item = &PartitionId> {
+        self.per_partition.keys()
+    }
+
     /// Returns `true` if the checkpoint delta is empty.
     pub fn is_empty(&self) -> bool {
         self.per_partition.is_empty()
@@ -552,28 +555,36 @@ mod tests {
     }
 
     #[test]
-    fn test_checkpoint_simple() -> anyhow::Result<()> {
+    fn test_checkpoint_simple() {
         let mut checkpoint = SourceCheckpoint::default();
         assert_eq!(format!("{:?}", checkpoint), "Ckpt()");
-        let delta1 = {
+
+        let delta = {
             let mut delta = SourceCheckpointDelta::from_partition_delta(
                 PartitionId::from("a"),
                 Position::from(123u64),
                 Position::from(128u64),
             );
-            delta.record_partition_delta(
-                PartitionId::from("b"),
-                Position::from(60002u64),
-                Position::from(60187u64),
-            )?;
+            delta
+                .record_partition_delta(
+                    PartitionId::from("b"),
+                    Position::from(60002u64),
+                    Position::from(60187u64),
+                )
+                .unwrap();
             delta
         };
-        assert!(checkpoint.try_apply_delta(delta1).is_ok());
+        checkpoint.try_apply_delta(delta.clone()).unwrap();
         assert_eq!(
             format!("{:?}", checkpoint),
             "Ckpt(a:00000000000000000128 b:00000000000000060187)"
         );
-        Ok(())
+        // `try_apply_delta` is not idempotent.
+        checkpoint.try_apply_delta(delta).unwrap_err();
+        assert_eq!(
+            format!("{:?}", checkpoint),
+            "Ckpt(a:00000000000000000128 b:00000000000000060187)"
+        );
     }
 
     #[test]

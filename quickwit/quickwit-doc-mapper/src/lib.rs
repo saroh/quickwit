@@ -19,6 +19,7 @@
 
 #![warn(missing_docs)]
 #![allow(clippy::bool_assert_comparison)]
+#![deny(clippy::disallowed_methods)]
 
 //! Index config defines how to configure an index and especially how
 //! to convert a json like documents to a document indexable by tantivy
@@ -27,9 +28,11 @@
 mod default_doc_mapper;
 mod doc_mapper;
 mod error;
+
+#[allow(missing_docs)]
+pub mod fast_field_reader;
 mod query_builder;
 mod routing_expression;
-mod sort_by;
 mod tokenizers;
 
 /// Pruning tags manipulation.
@@ -37,11 +40,12 @@ pub mod tag_pruning;
 
 pub use default_doc_mapper::{
     DefaultDocMapper, DefaultDocMapperBuilder, FieldMappingEntry, ModeType, QuickwitJsonOptions,
-    SortByConfig,
 };
-pub use doc_mapper::{DocMapper, NamedField};
+use default_doc_mapper::{
+    FieldMappingEntryForSerialization, IndexRecordOptionSchema, QuickwitTextTokenizer,
+};
+pub use doc_mapper::{DocMapper, NamedField, WarmupInfo};
 pub use error::{DocParsingError, QueryParserError};
-pub use sort_by::{SortBy, SortByField, SortOrder};
 pub use tokenizers::QUICKWIT_TOKENIZER_MANAGER;
 
 /// Field name reserved for storing the source document.
@@ -49,6 +53,17 @@ pub const SOURCE_FIELD_NAME: &str = "_source";
 
 /// Field name reserved for storing the dynamically indexed fields.
 pub const DYNAMIC_FIELD_NAME: &str = "_dynamic";
+
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(
+    QuickwitJsonOptions,
+    ModeType,
+    QuickwitTextTokenizer,
+    IndexRecordOptionSchema,
+    FieldMappingEntryForSerialization,
+)))]
+/// Schema used for the OpenAPI generation which are apart of this crate.
+pub struct DocMapperApiSchemas;
 
 /// Returns a default `DefaultIndexConfig` for unit tests.
 #[cfg(any(test, feature = "testsuite"))]
@@ -60,15 +75,12 @@ pub fn default_doc_mapper_for_test() -> DefaultDocMapper {
                 "body", "attributes.server", "attributes.server\\.status"
             ],
             "timestamp_field": "timestamp",
-            "sort_by": {
-                "field_name": "timestamp",
-                "order": "desc"
-            },
             "tag_fields": ["owner"],
             "field_mappings": [
                 {
                     "name": "timestamp",
-                    "type": "i64",
+                    "type": "datetime",
+                    "output_format": "unix_timestamp_secs",
                     "fast": true
                 },
                 {

@@ -27,6 +27,7 @@ use quickwit_config::VecSourceParams;
 use quickwit_metastore::checkpoint::{
     PartitionId, Position, SourceCheckpoint, SourceCheckpointDelta,
 };
+use serde_json::Value as JsonValue;
 use tracing::info;
 
 use crate::actors::DocProcessor;
@@ -113,7 +114,7 @@ impl Source for VecSource {
         format!("VecSource {{ source_id={} }}", self.source_id)
     }
 
-    fn observable_state(&self) -> serde_json::Value {
+    fn observable_state(&self) -> JsonValue {
         serde_json::json!({
             "next_item_idx": self.next_item_idx,
         })
@@ -124,7 +125,7 @@ impl Source for VecSource {
 mod tests {
     use std::path::PathBuf;
 
-    use quickwit_actors::{create_test_mailbox, Actor, Command, Universe};
+    use quickwit_actors::{Actor, Command, Universe};
     use quickwit_config::{SourceConfig, SourceParams};
     use quickwit_metastore::metastore_for_test;
     use serde_json::json;
@@ -134,8 +135,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_vec_source() -> anyhow::Result<()> {
-        let universe = Universe::new();
-        let (doc_processor_mailbox, doc_processor_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (doc_processor_mailbox, doc_processor_inbox) = universe.create_test_mailbox();
         let docs = std::iter::repeat_with(|| "{}".to_string())
             .take(100)
             .collect();
@@ -152,9 +153,11 @@ mod tests {
                 PathBuf::from("./queues"),
                 SourceConfig {
                     source_id: "test-vec-source".to_string(),
-                    num_pipelines: 1,
+                    desired_num_pipelines: 1,
+                    max_num_pipelines_per_indexer: 1,
                     enabled: true,
                     source_params: SourceParams::Vec(params.clone()),
+                    transform_config: None,
                 },
             ),
             params,
@@ -190,8 +193,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_vec_source_from_checkpoint() -> anyhow::Result<()> {
-        let universe = Universe::new();
-        let (doc_processor_mailbox, doc_processor_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (doc_processor_mailbox, doc_processor_inbox) = universe.create_test_mailbox();
         let docs = (0..10).map(|i| format!("{}", i)).collect();
         let params = VecSourceParams {
             docs,
@@ -209,9 +212,11 @@ mod tests {
                 PathBuf::from("./queues"),
                 SourceConfig {
                     source_id: "test-vec-source".to_string(),
-                    num_pipelines: 1,
+                    desired_num_pipelines: 1,
+                    max_num_pipelines_per_indexer: 1,
                     enabled: true,
                     source_params: SourceParams::Vec(params.clone()),
+                    transform_config: None,
                 },
             ),
             params,

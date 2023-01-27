@@ -1,6 +1,6 @@
 [package]
 name = "quickwit-serve"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Quickwit, Inc. <hello@quickwit.io>"]
 edition = "2021"
 license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
@@ -9,10 +9,15 @@ repository = "https://github.com/quickwit-oss/quickwit"
 homepage = "https://quickwit.io/"
 documentation = "https://quickwit.io/docs/"
 
+[[bin]]
+name = "elastic-api-generator"
+path = "src/elastic_api_generator.rs"
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 bytes = { workspace = true }
+clap = { workspace = true }
 futures = { workspace = true }
 futures-util = { workspace = true }
 hyper = { workspace = true }
@@ -24,12 +29,14 @@ rust-embed = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_qs = { workspace = true }
+serde_with = { workspace =  true }
 termcolor = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+utoipa = { workspace = true }
 opentelemetry = { workspace = true }
 warp = { workspace = true }
 
@@ -37,9 +44,12 @@ quickwit-actors = { workspace = true }
 quickwit-cluster = { workspace = true }
 quickwit-common = { workspace = true }
 quickwit-config = { workspace = true }
+quickwit-control-plane = { workspace = true }
 quickwit-core = { workspace = true }
 quickwit-directories = { workspace = true }
 quickwit-doc-mapper = { workspace = true }
+quickwit_elastic_api_generation = { workspace = true }
+quickwit-grpc-clients = { workspace = true }
 quickwit-indexing = { workspace = true }
 quickwit-ingest-api = { workspace = true }
 quickwit-jaeger = { workspace = true }
@@ -49,6 +59,9 @@ quickwit-opentelemetry = { workspace = true }
 quickwit-proto = { workspace = true }
 quickwit-search = { workspace = true }
 quickwit-storage = { workspace = true }
+
+[build-dependencies]
+time = { workspace = true }
 
 [dev-dependencies]
 assert-json-diff = { workspace = true }
@@ -62,6 +75,7 @@ tempfile = { workspace = true }
 quickwit-cluster = { workspace = true, features = ["testsuite"] }
 quickwit-common = { workspace = true, features = ["testsuite"] }
 quickwit-config = { workspace = true, features = ["testsuite"] }
+quickwit-control-plane = { workspace = true, features = ["testsuite"] }
 quickwit-indexing = { workspace = true, features = ["testsuite"] }
 quickwit-metastore = { workspace = true, features = ["testsuite"] }
 quickwit-search = { workspace = true, features = ["testsuite"] }

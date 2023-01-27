@@ -1,6 +1,6 @@
 [package]
 name = "quickwit-opentelemetry"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Quickwit, Inc. <hello@quickwit.io>"]
 edition = "2021"
 license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
@@ -13,6 +13,8 @@ documentation = "https://quickwit.io/docs/"
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+once_cell = { workspace = true }
+prost = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
@@ -20,6 +22,7 @@ tonic = { workspace = true }
 tracing = { workspace = true }
 
 quickwit-actors = { workspace = true }
+quickwit-common = { workspace = true }
 quickwit-ingest-api = { workspace = true }
 quickwit-proto = { workspace = true }
 

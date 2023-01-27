@@ -17,23 +17,32 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+#![deny(clippy::disallowed_methods)]
+
 mod checklist;
 mod coolid;
 
-pub mod fast_field_reader;
 pub mod fs;
+pub mod io;
+mod kill_switch;
 pub mod metrics;
 pub mod net;
+mod progress;
 pub mod rand;
 pub mod runtimes;
 pub mod uri;
 
+use std::env;
 use std::fmt::Debug;
 use std::ops::{Range, RangeInclusive};
 use std::str::FromStr;
 
-pub use checklist::{print_checklist, run_checklist, BLUE_COLOR, GREEN_COLOR, RED_COLOR};
+pub use checklist::{
+    print_checklist, run_checklist, ChecklistError, BLUE_COLOR, GREEN_COLOR, RED_COLOR,
+};
 pub use coolid::new_coolid;
+pub use kill_switch::KillSwitch;
+pub use progress::{Progress, ProtectedZoneGuard};
 use tracing::{error, info};
 
 pub fn chunk_range(range: Range<usize>, chunk_size: usize) -> impl Iterator<Item = Range<usize>> {
@@ -107,8 +116,17 @@ pub fn is_disjoint(left: &Range<i64>, right: &RangeInclusive<i64>) -> bool {
     left.end <= *right.start() || *right.end() < left.start
 }
 
+/// For use with the `skip_serializing_if` serde attribute.
+pub fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+pub fn no_color() -> bool {
+    matches!(env::var("NO_COLOR"), Ok(value) if !value.is_empty())
+}
+
 #[macro_export]
-macro_rules! ignore_io_error {
+macro_rules! ignore_error_kind {
     ($kind:path, $expr:expr) => {
         match $expr {
             Ok(_) => Ok(()),
@@ -116,6 +134,34 @@ macro_rules! ignore_io_error {
             Err(error) => Err(error),
         }
     };
+}
+
+pub struct PrettySample<'a, T>(&'a [T], usize);
+
+impl<'a, T> PrettySample<'a, T> {
+    pub fn new(slice: &'a [T], sample_size: usize) -> Self {
+        Self(slice, sample_size)
+    }
+}
+
+impl<T> Debug for PrettySample<'_, T>
+where T: Debug
+{
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "[")?;
+        for (i, item) in self.0.iter().enumerate() {
+            if i == self.1 {
+                write!(formatter, ", and {} more", self.0.len() - i)?;
+                break;
+            }
+            if i > 0 {
+                write!(formatter, ", ")?;
+            }
+            write!(formatter, "{:?}", item)?;
+        }
+        write!(formatter, "]")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -149,10 +195,28 @@ mod tests {
 
     #[test]
     fn test_ignore_io_error_macro() {
-        ignore_io_error!(
+        ignore_error_kind!(
             ErrorKind::NotFound,
             std::fs::remove_file("file-does-not-exist")
         )
         .unwrap();
+    }
+
+    #[test]
+    fn test_pretty_sample() {
+        let pretty_sample = PrettySample::<'_, usize>::new(&[], 2);
+        assert_eq!(format!("{:?}", pretty_sample), "[]");
+
+        let pretty_sample = PrettySample::new(&[1], 2);
+        assert_eq!(format!("{:?}", pretty_sample), "[1]");
+
+        let pretty_sample = PrettySample::new(&[1, 2], 2);
+        assert_eq!(format!("{:?}", pretty_sample), "[1, 2]");
+
+        let pretty_sample = PrettySample::new(&[1, 2, 3], 2);
+        assert_eq!(format!("{:?}", pretty_sample), "[1, 2, and 1 more]");
+
+        let pretty_sample = PrettySample::new(&[1, 2, 3, 4], 2);
+        assert_eq!(format!("{:?}", pretty_sample), "[1, 2, and 2 more]");
     }
 }

@@ -17,6 +17,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::str::FromStr;
 
@@ -27,6 +28,7 @@ use serde::Serialize;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Sequence)]
 pub enum QuickwitService {
+    ControlPlane,
     Indexer,
     Searcher,
     Janitor,
@@ -36,13 +38,15 @@ pub enum QuickwitService {
 impl QuickwitService {
     pub fn as_str(&self) -> &'static str {
         match self {
+            QuickwitService::ControlPlane => "control_plane",
             QuickwitService::Indexer => "indexer",
             QuickwitService::Searcher => "searcher",
             QuickwitService::Janitor => "janitor",
             QuickwitService::Metastore => "metastore",
         }
     }
-    pub fn supported_services() -> Vec<QuickwitService> {
+
+    pub fn supported_services() -> HashSet<QuickwitService> {
         all::<QuickwitService>().into_iter().collect()
     }
 }
@@ -58,14 +62,15 @@ impl FromStr for QuickwitService {
 
     fn from_str(service_str: &str) -> Result<Self, Self::Err> {
         match service_str {
+            "control_plane" => Ok(QuickwitService::ControlPlane),
             "indexer" => Ok(QuickwitService::Indexer),
             "searcher" => Ok(QuickwitService::Searcher),
             "janitor" => Ok(QuickwitService::Janitor),
             "metastore" => Ok(QuickwitService::Metastore),
             _ => {
                 bail!(
-                    "Failed to parse service `{service_str}`. Supported services are: {}",
-                    QuickwitService::supported_services().iter().join(", ")
+                    "Failed to parse service `{service_str}`. Supported services are: `{}`.",
+                    QuickwitService::supported_services().iter().join("`, `")
                 )
             }
         }

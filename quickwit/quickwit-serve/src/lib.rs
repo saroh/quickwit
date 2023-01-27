@@ -17,6 +17,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+#![deny(clippy::disallowed_methods)]
+
 mod args;
 mod format;
 mod metrics;
@@ -26,11 +28,13 @@ mod rest;
 
 mod cluster_api;
 mod delete_task_api;
+mod elastic_search_api;
 mod health_check_api;
 mod index_api;
 mod indexing_api;
 mod ingest_api;
 mod node_info_handler;
+mod openapi;
 mod search_api;
 #[cfg(test)]
 mod test_utils;
@@ -46,17 +50,26 @@ use std::time::Duration;
 use anyhow::anyhow;
 use format::Format;
 use itertools::Itertools;
+use once_cell::sync::OnceCell;
 use quickwit_actors::{Mailbox, Universe};
 use quickwit_cluster::{Cluster, ClusterMember};
 use quickwit_config::service::QuickwitService;
-use quickwit_config::QuickwitConfig;
-use quickwit_core::IndexService;
+use quickwit_config::{load_index_config_from_user_config, ConfigFormat, QuickwitConfig};
+use quickwit_control_plane::scheduler::IndexingScheduler;
+use quickwit_control_plane::start_control_plane_service;
+use quickwit_core::{IndexService, IndexServiceError};
+use quickwit_grpc_clients::service_client_pool::ServiceClientPool;
+use quickwit_grpc_clients::ControlPlaneGrpcClient;
 use quickwit_indexing::actors::IndexingService;
 use quickwit_indexing::start_indexing_service;
 use quickwit_ingest_api::{start_ingest_api_service, IngestApiService};
 use quickwit_janitor::{start_janitor_service, JanitorService};
-use quickwit_metastore::{quickwit_metastore_uri_resolver, Metastore, MetastoreGrpcClient};
-use quickwit_search::{start_searcher_service, SearchClientPool, SearchService};
+use quickwit_metastore::{
+    quickwit_metastore_uri_resolver, Metastore, MetastoreError, MetastoreGrpcClient,
+    MetastoreWithControlPlaneTriggers, RetryingMetastore,
+};
+use quickwit_opentelemetry::otlp::OTEL_TRACE_INDEX_CONFIG;
+use quickwit_search::{start_searcher_service, SearchJobPlacer, SearchService};
 use quickwit_storage::quickwit_storage_uri_resolver;
 use serde::{Deserialize, Serialize};
 use tracing::{error, warn};
@@ -75,16 +88,16 @@ const READYNESS_REPORTING_INTERVAL: Duration = if cfg!(any(test, feature = "test
 
 struct QuickwitServices {
     pub config: Arc<QuickwitConfig>,
-    pub build_info: Arc<QuickwitBuildInfo>,
+    pub build_info: &'static QuickwitBuildInfo,
     pub cluster: Arc<Cluster>,
     pub metastore: Arc<dyn Metastore>,
+    pub indexing_scheduler_service: Option<Mailbox<IndexingScheduler>>,
     /// We do have a search service even on nodes that are not running `search`.
     /// It is only used to serve the rest API calls and will only execute
     /// the root requests.
     pub search_service: Arc<dyn SearchService>,
-    pub indexer_service: Option<Mailbox<IndexingService>>,
-    #[allow(dead_code)] // TODO remove
-    pub janitor_service: Option<JanitorService>,
+    pub indexing_service: Option<Mailbox<IndexingService>>,
+    pub janitor_service: Option<Mailbox<JanitorService>>,
     pub ingest_api_service: Option<Mailbox<IngestApiService>>,
     pub index_service: Arc<IndexService>,
     pub services: HashSet<QuickwitService>,
@@ -93,7 +106,7 @@ struct QuickwitServices {
 fn has_node_with_metastore_service(members: &[ClusterMember]) -> bool {
     members.iter().any(|member| {
         member
-            .available_services
+            .enabled_services
             .contains(&QuickwitService::Metastore)
     })
 }
@@ -109,9 +122,17 @@ pub async fn serve_quickwit(config: QuickwitConfig) -> anyhow::Result<()> {
         .enabled_services
         .contains(&QuickwitService::Metastore)
     {
-        quickwit_metastore_uri_resolver()
+        let metastore = quickwit_metastore_uri_resolver()
             .resolve(&config.metastore_uri)
-            .await?
+            .await?;
+        let control_plane_client = ControlPlaneGrpcClient::create_and_update_from_members(
+            cluster.ready_member_change_watcher(),
+        )
+        .await?;
+        Arc::new(MetastoreWithControlPlaneTriggers::new(
+            metastore,
+            control_plane_client,
+        ))
     } else {
         // Wait 10 seconds for nodes running a `Metastore` service.
         cluster
@@ -125,10 +146,12 @@ pub async fn serve_quickwit(config: QuickwitConfig) -> anyhow::Result<()> {
                      run --service metastore`."
                 )
             })?;
-        let metastore_client = MetastoreGrpcClient::create_and_update_from_members(
+        let grpc_metastore_client = MetastoreGrpcClient::create_and_update_from_members(
+            1,
             cluster.ready_member_change_watcher(),
         )
         .await?;
+        let metastore_client = RetryingMetastore::new(Box::new(grpc_metastore_client));
         Arc::new(metastore_client)
     };
 
@@ -139,38 +162,63 @@ pub async fn serve_quickwit(config: QuickwitConfig) -> anyhow::Result<()> {
     )
     .await?;
 
-    tokio::spawn(node_readyness_reporting_task(
+    tokio::spawn(node_readiness_reporting_task(
         cluster.clone(),
         metastore.clone(),
     ));
 
+    // Always instantiate index management service.
+    let index_service = Arc::new(IndexService::new(
+        metastore.clone(),
+        storage_resolver.clone(),
+    ));
+
     let universe = Universe::new();
 
-    let (ingest_api_service, indexer_service) =
-        if config.enabled_services.contains(&QuickwitService::Indexer) {
-            let ingest_api_service =
-                start_ingest_api_service(&universe, &config.data_dir_path).await?;
-            let indexing_service = start_indexing_service(
-                &universe,
-                &config,
-                metastore.clone(),
-                storage_resolver.clone(),
-            )
-            .await?;
-            (Some(ingest_api_service), Some(indexing_service))
-        } else {
-            (None, None)
-        };
+    let (ingest_api_service, indexing_service) = if config
+        .enabled_services
+        .contains(&QuickwitService::Indexer)
+    {
+        let ingest_api_service =
+            start_ingest_api_service(&universe, &config.data_dir_path, &config.ingest_api_config)
+                .await?;
+        if config.indexer_config.enable_otlp_endpoint {
+            let index_config = load_index_config_from_user_config(
+                ConfigFormat::Yaml,
+                OTEL_TRACE_INDEX_CONFIG.as_bytes(),
+                &config.default_index_root_uri,
+            )?;
+            match index_service.create_index(index_config, false).await {
+                Ok(_)
+                | Err(IndexServiceError::MetastoreError(MetastoreError::IndexAlreadyExists {
+                    ..
+                })) => Ok(()),
+                Err(error) => Err(error),
+            }?;
+        }
+        let indexing_service = start_indexing_service(
+            &universe,
+            &config,
+            cluster.clone(),
+            metastore.clone(),
+            storage_resolver.clone(),
+        )
+        .await?;
+        (Some(ingest_api_service), Some(indexing_service))
+    } else {
+        (None, None)
+    };
 
-    let search_client_pool =
-        SearchClientPool::create_and_keep_updated(cluster.ready_member_change_watcher()).await?;
+    let search_job_placer = SearchJobPlacer::new(
+        ServiceClientPool::create_and_update_members(cluster.ready_member_change_watcher()).await?,
+    );
 
     let janitor_service = if config.enabled_services.contains(&QuickwitService::Janitor) {
         let janitor_service = start_janitor_service(
             &universe,
             &config,
             metastore.clone(),
-            search_client_pool.clone(),
+            search_job_placer.clone(),
             storage_resolver.clone(),
         )
         .await?;
@@ -182,28 +230,31 @@ pub async fn serve_quickwit(config: QuickwitConfig) -> anyhow::Result<()> {
     let search_service: Arc<dyn SearchService> = start_searcher_service(
         &config,
         metastore.clone(),
-        storage_resolver.clone(),
-        search_client_pool,
+        storage_resolver,
+        search_job_placer,
     )
     .await?;
 
-    // Always instantiate index management service.
-    let index_service = Arc::new(IndexService::new(
-        metastore.clone(),
-        storage_resolver,
-        config.default_index_root_uri.clone(),
-    ));
+    let indexing_scheduler_service: Option<Mailbox<IndexingScheduler>> = if config
+        .enabled_services
+        .contains(&QuickwitService::ControlPlane)
+    {
+        Some(start_control_plane_service(&universe, cluster.clone(), metastore.clone()).await?)
+    } else {
+        None
+    };
 
     let grpc_listen_addr = config.grpc_listen_addr;
     let rest_listen_addr = config.rest_listen_addr;
     let services = config.enabled_services.clone();
     let quickwit_services = QuickwitServices {
         config: Arc::new(config),
-        build_info: Arc::new(build_quickwit_build_info()),
+        build_info: quickwit_build_info(),
         cluster,
         metastore,
+        indexing_scheduler_service,
         search_service,
-        indexer_service,
+        indexing_service,
         janitor_service,
         ingest_api_service,
         index_service,
@@ -234,8 +285,8 @@ fn with_arg<T: Clone + Send>(arg: T) -> impl Filter<Extract = (T,), Error = Infa
     warp::any().map(move || arg.clone())
 }
 
-/// Reports node readyness to chitchat cluster every 10 seconds (25 ms for tests).
-async fn node_readyness_reporting_task(cluster: Arc<Cluster>, metastore: Arc<dyn Metastore>) {
+/// Reports node readiness to chitchat cluster every 10 seconds (25 ms for tests).
+async fn node_readiness_reporting_task(cluster: Arc<Cluster>, metastore: Arc<dyn Metastore>) {
     let mut interval = tokio::time::interval(READYNESS_REPORTING_INTERVAL);
     loop {
         interval.tick().await;
@@ -264,16 +315,16 @@ async fn check_cluster_configuration(
         .list_indexes_metadatas()
         .await?
         .into_iter()
-        .filter(|index_metadata| index_metadata.index_uri.protocol().is_file_storage())
+        .filter(|index_metadata| index_metadata.index_uri().protocol().is_file_storage())
         .collect::<Vec<_>>();
     if !file_backed_indexes.is_empty() {
         let index_ids = file_backed_indexes
             .iter()
-            .map(|index_metadata| &index_metadata.index_id)
+            .map(|index_metadata| index_metadata.index_id())
             .join(", ");
         let index_uris = file_backed_indexes
             .iter()
-            .map(|index_metadata| &index_metadata.index_uri)
+            .map(|index_metadata| index_metadata.index_uri())
             .join(", ");
         warn!(
             index_ids=%index_ids,
@@ -284,32 +335,61 @@ async fn check_cluster_configuration(
     Ok(())
 }
 
-#[derive(Serialize, Deserialize, Clone, Eq, PartialEq, Debug)]
+#[derive(Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct QuickwitBuildInfo {
-    pub commit_version_tag: &'static str,
+    pub build_date: &'static str,
+    pub build_profile: &'static str,
+    pub build_target: &'static str,
     pub cargo_pkg_version: &'static str,
-    pub cargo_build_target: &'static str,
-    pub commit_short_hash: &'static str,
     pub commit_date: &'static str,
-    pub version: &'static str,
+    pub commit_hash: &'static str,
+    pub commit_short_hash: &'static str,
+    pub commit_tags: Vec<String>,
+    pub version: String,
 }
 
-/// Builds QuickwitBuildInfo from env variables.
-pub fn build_quickwit_build_info() -> QuickwitBuildInfo {
-    let commit_version_tag = env!("QW_COMMIT_VERSION_TAG");
-    let cargo_pkg_version = env!("CARGO_PKG_VERSION");
-    let version = if commit_version_tag == "none" {
-        // concat macro only accepts literals.
-        concat!(env!("CARGO_PKG_VERSION"), "-nightly")
-    } else {
-        cargo_pkg_version
-    };
-    QuickwitBuildInfo {
-        commit_version_tag,
-        cargo_pkg_version,
-        cargo_build_target: env!("CARGO_BUILD_TARGET"),
-        commit_short_hash: env!("QW_COMMIT_SHORT_HASH"),
-        commit_date: env!("QW_COMMIT_DATE"),
-        version,
-    }
+/// QuickwitBuildInfo from env variables prepopulated by the build script or CI env.
+pub fn quickwit_build_info() -> &'static QuickwitBuildInfo {
+    const UNKNOWN: &str = "unknown";
+
+    static INSTANCE: OnceCell<QuickwitBuildInfo> = OnceCell::new();
+    INSTANCE.get_or_init(|| {
+        let commit_date = option_env!("QW_COMMIT_DATE")
+            .filter(|commit_date| !commit_date.is_empty())
+            .unwrap_or(UNKNOWN);
+        let commit_hash = option_env!("QW_COMMIT_HASH")
+            .filter(|commit_hash| !commit_hash.is_empty())
+            .unwrap_or(UNKNOWN);
+        let commit_short_hash = option_env!("QW_COMMIT_HASH")
+            .filter(|commit_hash| commit_hash.len() >= 7)
+            .map(|commit_hash| &commit_hash[..7])
+            .unwrap_or(UNKNOWN);
+        let commit_tags: Vec<String> = option_env!("QW_COMMIT_TAGS")
+            .map(|tags| {
+                tags.split(',')
+                    .map(|tag| tag.trim().to_string())
+                    .filter(|tag| !tag.is_empty())
+                    .sorted()
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let version = commit_tags
+            .iter()
+            .find(|tag| tag.starts_with('v'))
+            .cloned()
+            .unwrap_or_else(|| concat!(env!("CARGO_PKG_VERSION"), "-nightly").to_string());
+
+        QuickwitBuildInfo {
+            build_date: env!("BUILD_DATE"),
+            build_profile: env!("BUILD_PROFILE"),
+            build_target: env!("BUILD_TARGET"),
+            cargo_pkg_version: env!("CARGO_PKG_VERSION"),
+            commit_date,
+            commit_hash,
+            commit_short_hash,
+            commit_tags,
+            version,
+        }
+    })
 }

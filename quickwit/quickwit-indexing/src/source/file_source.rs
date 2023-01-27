@@ -72,9 +72,10 @@ impl Source for FileSource {
         let mut doc_batch = RawDocBatch::default();
         while self.counters.current_offset < limit_num_bytes {
             let mut doc_line = String::new();
-            let num_bytes = self
-                .reader
-                .read_line(&mut doc_line)
+            // guard the zone in case of slow read, such as reading from someone
+            // typing to stdin
+            let num_bytes = ctx
+                .protect_future(self.reader.read_line(&mut doc_line))
                 .await
                 .map_err(|io_err: io::Error| anyhow::anyhow!(io_err))?;
             if num_bytes == 0 {
@@ -171,7 +172,7 @@ mod tests {
     use std::io::Write;
     use std::path::PathBuf;
 
-    use quickwit_actors::{create_test_mailbox, Command, Universe};
+    use quickwit_actors::{Command, Universe};
     use quickwit_config::{SourceConfig, SourceParams};
     use quickwit_metastore::checkpoint::{SourceCheckpoint, SourceCheckpointDelta};
     use quickwit_metastore::metastore_for_test;
@@ -181,8 +182,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_file_source() -> anyhow::Result<()> {
-        let universe = Universe::new();
-        let (doc_processor_mailbox, indexer_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (doc_processor_mailbox, indexer_inbox) = universe.create_test_mailbox();
         let params = FileSourceParams::file("data/test_corpus.json");
 
         let metastore = metastore_for_test();
@@ -193,9 +194,11 @@ mod tests {
                 PathBuf::from("./queues"),
                 SourceConfig {
                     source_id: "test-file-source".to_string(),
-                    num_pipelines: 1,
+                    desired_num_pipelines: 1,
+                    max_num_pipelines_per_indexer: 1,
                     enabled: true,
                     source_params: SourceParams::File(params.clone()),
+                    transform_config: None,
                 },
             ),
             params,
@@ -230,8 +233,8 @@ mod tests {
     #[tokio::test]
     async fn test_file_source_several_batch() -> anyhow::Result<()> {
         quickwit_common::setup_logging_for_tests();
-        let universe = Universe::new();
-        let (doc_processor_mailbox, doc_processor_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (doc_processor_mailbox, doc_processor_inbox) = universe.create_test_mailbox();
         use tempfile::NamedTempFile;
         let mut temp_file = NamedTempFile::new()?;
         let temp_path = temp_file.path().to_path_buf();
@@ -256,9 +259,11 @@ mod tests {
                 PathBuf::from("./queues"),
                 SourceConfig {
                     source_id: "test-file-source".to_string(),
-                    num_pipelines: 1,
+                    desired_num_pipelines: 1,
+                    max_num_pipelines_per_indexer: 1,
                     enabled: true,
                     source_params: SourceParams::File(params.clone()),
+                    transform_config: None,
                 },
             ),
             params,
@@ -315,8 +320,8 @@ mod tests {
     #[tokio::test]
     async fn test_file_source_resume_from_checkpoint() -> anyhow::Result<()> {
         quickwit_common::setup_logging_for_tests();
-        let universe = Universe::new();
-        let (doc_processor_mailbox, doc_processor_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (doc_processor_mailbox, doc_processor_inbox) = universe.create_test_mailbox();
         use tempfile::NamedTempFile;
         let mut temp_file = NamedTempFile::new()?;
         for i in 0..100 {
@@ -342,9 +347,11 @@ mod tests {
                 PathBuf::from("./queues"),
                 SourceConfig {
                     source_id: "test-file-source".to_string(),
-                    num_pipelines: 1,
+                    desired_num_pipelines: 1,
+                    max_num_pipelines_per_indexer: 1,
                     enabled: true,
                     source_params: SourceParams::File(params.clone()),
+                    transform_config: None,
                 },
             ),
             params,

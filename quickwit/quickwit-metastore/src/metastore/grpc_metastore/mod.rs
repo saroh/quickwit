@@ -19,97 +19,98 @@
 
 mod grpc_adapter;
 
-use std::collections::HashSet;
 use std::error::Error;
-use std::net::SocketAddr;
-use std::ops::Range;
-use std::time::Duration;
 
 use async_trait::async_trait;
 pub use grpc_adapter::GrpcMetastoreAdapter;
-use http::Uri;
 use itertools::Itertools;
 use quickwit_cluster::ClusterMember;
 use quickwit_common::uri::Uri as QuickwitUri;
 use quickwit_config::service::QuickwitService;
-use quickwit_config::SourceConfig;
-use quickwit_doc_mapper::tag_pruning::TagFilterAst;
+use quickwit_config::{IndexConfig, SourceConfig};
+use quickwit_grpc_clients::create_balance_channel_from_watched_members;
 use quickwit_proto::metastore_api::metastore_api_service_client::MetastoreApiServiceClient;
 use quickwit_proto::metastore_api::{
     AddSourceRequest, CreateIndexRequest, DeleteIndexRequest, DeleteQuery, DeleteSourceRequest,
     DeleteSplitsRequest, DeleteTask, IndexMetadataRequest, LastDeleteOpstampRequest,
     ListAllSplitsRequest, ListDeleteTasksRequest, ListIndexesMetadatasRequest, ListSplitsRequest,
     ListStaleSplitsRequest, MarkSplitsForDeletionRequest, PublishSplitsRequest,
-    ResetSourceCheckpointRequest, StageSplitRequest, ToggleSourceRequest,
+    ResetSourceCheckpointRequest, StageSplitsRequest, ToggleSourceRequest,
     UpdateSplitsDeleteOpstampRequest,
 };
-use quickwit_proto::tonic::transport::{Channel, Endpoint};
+use quickwit_proto::tonic::codegen::InterceptedService;
+use quickwit_proto::tonic::transport::Channel;
 use quickwit_proto::tonic::Status;
-use tokio::sync::mpsc::Sender;
+use quickwit_proto::SpanContextInterceptor;
+use tokio::sync::watch;
 use tokio_stream::wrappers::WatchStream;
-use tokio_stream::StreamExt;
-use tower::discover::Change;
-use tower::service_fn;
 use tower::timeout::error::Elapsed;
 use tower::timeout::Timeout;
-use tracing::{error, info};
 
 use crate::checkpoint::IndexCheckpointDelta;
 use crate::{
-    IndexMetadata, Metastore, MetastoreError, MetastoreResult, Split, SplitMetadata, SplitState,
+    IndexMetadata, ListSplitsQuery, Metastore, MetastoreError, MetastoreResult, Split,
+    SplitMetadata,
 };
 
-const CLIENT_TIMEOUT_DURATION: Duration = if cfg!(test) {
-    Duration::from_millis(100)
-} else {
-    Duration::from_secs(5)
-};
+// URI describing in a generic way the metastore services resource present in the cluster (=
+// discovered by Quickwit gossip). This value is used to build the URI of `MetastoreGrpcClient` and
+// is only useful for debugging.
+const GRPC_METASTORE_BASE_URI: &str = "grpc://metastore.service.cluster";
 
 /// The [`MetastoreGrpcClient`] sends gRPC requests to cluster members running a [`Metastore`]
 /// service, those nodes will execute the queries on the metastore.
 /// The [`MetastoreGrpcClient`] use tonic load balancer to balance requests between nodes and
 /// listen to cluster live nodes changes to keep updated the list of available nodes.
 #[derive(Clone)]
-pub struct MetastoreGrpcClient(MetastoreApiServiceClient<Timeout<Channel>>);
+pub struct MetastoreGrpcClient {
+    underlying:
+        MetastoreApiServiceClient<InterceptedService<Timeout<Channel>, SpanContextInterceptor>>,
+    pool_size_rx: watch::Receiver<usize>,
+    // URI used to describe the metastore resource of form
+    // `GRPC_METASTORE_BASE_URI:{grpc_advertise_port}`. This value is only useful for
+    // debugging.
+    uri: QuickwitUri,
+}
 
 impl MetastoreGrpcClient {
     /// Create a [`MetastoreGrpcClient`] that sends gRPC requests to nodes running
     /// [`Metastore`] service. It listens to cluster members changes to update the
     /// nodes.
+    /// `grpc_advertise_port` is used only for building the `uri`.
     pub async fn create_and_update_from_members(
-        mut members_watch_channel: WatchStream<Vec<ClusterMember>>,
+        grpc_advertise_port: u16,
+        members_watch_channel: WatchStream<Vec<ClusterMember>>,
     ) -> anyhow::Result<Self> {
-        // Create a balance channel whose endpoint can be updated thanks to a sender.
-        let (channel, channel_tx) = Channel::balance_channel(10);
-
-        // A request send to to a channel with no endpoint will hang. To avoid a blocking request, a
-        // timeout is added to the channel.
-        // TODO: ideally, we want to implement our own `Channel::balance_channel` to
-        // properly raise a timeout error.
-        let timeout_channel = Timeout::new(channel, CLIENT_TIMEOUT_DURATION);
-
-        let mut grpc_addresses_in_use = HashSet::new();
-
-        // Watch for cluster members changes and dynamically update channel endpoint.
-        tokio::spawn(async move {
-            while let Some(new_members) = members_watch_channel.next().await {
-                let new_grpc_addresses = get_metastore_grpc_addresses(&new_members);
-                update_channel_endpoints(&new_grpc_addresses, &grpc_addresses_in_use, &channel_tx)
-                    .await?; // <- Fails if the channel is closed. In this case we can stop the loop.
-                grpc_addresses_in_use = new_grpc_addresses;
-            }
-            Result::<_, anyhow::Error>::Ok(())
-        });
-
-        Ok(Self(MetastoreApiServiceClient::new(timeout_channel)))
+        let (channel, pool_size_rx) = create_balance_channel_from_watched_members(
+            members_watch_channel,
+            QuickwitService::Metastore,
+        )
+        .await?;
+        let underlying =
+            MetastoreApiServiceClient::with_interceptor(channel, SpanContextInterceptor);
+        let uri = QuickwitUri::from_well_formed(format!(
+            "{}:{}",
+            GRPC_METASTORE_BASE_URI, grpc_advertise_port
+        ));
+        Ok(Self {
+            uri,
+            underlying,
+            pool_size_rx,
+        })
     }
 
-    /// Creates a [`MetastoreService`] from a duplex stream client for testing purpose.
-    #[doc(hidden)]
+    /// Creates a [`MetastoreGrpcClient`] from a duplex stream client for testing purpose.
+    #[cfg(any(test, feature = "testsuite"))]
     pub async fn from_duplex_stream(client: tokio::io::DuplexStream) -> anyhow::Result<Self> {
+        use std::time::Duration;
+
+        use http::Uri;
+        use quickwit_proto::tonic::transport::Endpoint;
+
         let mut client = Some(client);
         let channel = Endpoint::try_from("http://test.server")?
-            .connect_with_connector(service_fn(move |_: Uri| {
+            .connect_with_connector(tower::service_fn(move |_: Uri| {
                 let client = client.take();
                 async move {
                     client.ok_or_else(|| {
@@ -118,35 +119,44 @@ impl MetastoreGrpcClient {
                 }
             }))
             .await?;
-        let client = MetastoreApiServiceClient::new(Timeout::new(channel, CLIENT_TIMEOUT_DURATION));
-        Ok(Self(client))
+        let timeout_channel = Timeout::new(channel, Duration::from_secs(1));
+        let underlying =
+            MetastoreApiServiceClient::with_interceptor(timeout_channel, SpanContextInterceptor);
+        let (_pool_size_tx, pool_size_rx) = watch::channel(1);
+        Ok(Self {
+            underlying,
+            pool_size_rx,
+            uri: QuickwitUri::from_well_formed(GRPC_METASTORE_BASE_URI),
+        })
     }
 }
 
 #[async_trait]
 impl Metastore for MetastoreGrpcClient {
     async fn check_connectivity(&self) -> anyhow::Result<()> {
-        // TODO: https://github.com/quickwit-oss/quickwit/issues/1879
+        if *self.pool_size_rx.borrow() == 0 {
+            return Err(anyhow::anyhow!("No metastore server in the pool."));
+        }
         Ok(())
     }
 
     fn uri(&self) -> &QuickwitUri {
-        unimplemented!()
+        &self.uri
     }
 
     /// Creates an index.
-    async fn create_index(&self, index_metadata: IndexMetadata) -> MetastoreResult<()> {
-        let index_metadata_serialized_json =
-            serde_json::to_string(&index_metadata).map_err(|error| {
+    async fn create_index(&self, index_config: IndexConfig) -> MetastoreResult<()> {
+        let index_config_serialized_json =
+            serde_json::to_string(&index_config).map_err(|error| {
                 MetastoreError::JsonSerializeError {
-                    name: "IndexMetadata".to_string(),
+                    struct_name: "IndexConfig".to_string(),
                     message: error.to_string(),
                 }
             })?;
         let request = CreateIndexRequest {
-            index_metadata_serialized_json,
+            index_config_serialized_json,
         };
-        self.0
+        self.underlying
             .clone()
             .create_index(request)
             .await
@@ -157,7 +167,7 @@ impl Metastore for MetastoreGrpcClient {
     /// List indexes.
     async fn list_indexes_metadatas(&self) -> MetastoreResult<Vec<IndexMetadata>> {
         let response = self
-            .0
+            .underlying
             .clone()
             .list_indexes_metadatas(ListIndexesMetadatasRequest {})
             .await
@@ -165,7 +175,7 @@ impl Metastore for MetastoreGrpcClient {
         let indexes_metadatas =
             serde_json::from_str(&response.into_inner().indexes_metadatas_serialized_json)
                 .map_err(|error| MetastoreError::JsonDeserializeError {
-                    name: "Vec<IndexMetadata>".to_string(),
+                    struct_name: "Vec<IndexMetadata>".to_string(),
                     message: error.to_string(),
                 })?;
         Ok(indexes_metadatas)
@@ -177,7 +187,7 @@ impl Metastore for MetastoreGrpcClient {
             index_id: index_id.to_string(),
         };
         let response = self
-            .0
+            .underlying
             .clone()
             .index_metadata(request)
             .await
@@ -186,7 +196,7 @@ impl Metastore for MetastoreGrpcClient {
             &response.into_inner().index_metadata_serialized_json,
         )
         .map_err(|error| MetastoreError::JsonDeserializeError {
-            name: "IndexMetadata".to_string(),
+            struct_name: "IndexMetadata".to_string(),
             message: error.to_string(),
         })?;
         Ok(index_metadata)
@@ -197,7 +207,7 @@ impl Metastore for MetastoreGrpcClient {
         let request = DeleteIndexRequest {
             index_id: index_id.to_string(),
         };
-        self.0
+        self.underlying
             .clone()
             .delete_index(request)
             .await
@@ -206,26 +216,24 @@ impl Metastore for MetastoreGrpcClient {
         Ok(())
     }
 
-    /// Stages a split.
-    async fn stage_split(
+    /// Stages several splits.
+    async fn stage_splits(
         &self,
         index_id: &str,
-        split_metadata: SplitMetadata,
+        split_metadata_list: Vec<SplitMetadata>,
     ) -> MetastoreResult<()> {
-        let split_metadata_serialized_json =
-            serde_json::to_string(&split_metadata).map_err(|error| {
-                MetastoreError::JsonSerializeError {
-                    name: "SplitMetadata".to_string(),
-                    message: error.to_string(),
-                }
+        let split_metadata_list_serialized_json = serde_json::to_string(&split_metadata_list)
+            .map_err(|error| MetastoreError::JsonSerializeError {
+                struct_name: "Vec<SplitMetadata>".to_string(),
+                message: error.to_string(),
             })?;
-        let tonic_request = StageSplitRequest {
+        let tonic_request = StageSplitsRequest {
             index_id: index_id.to_string(),
-            split_metadata_serialized_json,
+            split_metadata_list_serialized_json,
         };
-        self.0
+        self.underlying
             .clone()
-            .stage_split(tonic_request)
+            .stage_splits(tonic_request)
             .await
             .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
         Ok(())
@@ -248,7 +256,7 @@ impl Metastore for MetastoreGrpcClient {
             .map(|checkpoint_delta| serde_json::to_string(&checkpoint_delta))
             .transpose()
             .map_err(|error| MetastoreError::JsonSerializeError {
-                name: "IndexCheckpointDelta".to_string(),
+                struct_name: "IndexCheckpointDelta".to_string(),
                 message: error.to_string(),
             })?;
         let request = PublishSplitsRequest {
@@ -257,7 +265,7 @@ impl Metastore for MetastoreGrpcClient {
             replaced_split_ids: replaced_split_ids_vec,
             index_checkpoint_delta_serialized_json,
         };
-        self.0
+        self.underlying
             .clone()
             .publish_splits(request)
             .await
@@ -267,29 +275,16 @@ impl Metastore for MetastoreGrpcClient {
     }
 
     /// Lists the splits.
-    async fn list_splits(
-        &self,
-        index_id: &str,
-        split_state: SplitState,
-        time_range: Option<Range<i64>>,
-        tags: Option<TagFilterAst>,
-    ) -> MetastoreResult<Vec<Split>> {
-        let tags_serialized_json = tags
-            .map(|tags_filter| serde_json::to_string(&tags_filter))
-            .transpose()
-            .map_err(|error| MetastoreError::JsonSerializeError {
-                name: "TagFilterAst".to_string(),
+    async fn list_splits<'a>(&self, query: ListSplitsQuery<'a>) -> MetastoreResult<Vec<Split>> {
+        let filter_json =
+            serde_json::to_string(&query).map_err(|error| MetastoreError::JsonSerializeError {
+                struct_name: "ListSplitsQuery".to_string(),
                 message: error.to_string(),
             })?;
-        let request = ListSplitsRequest {
-            index_id: index_id.to_string(),
-            split_state: split_state.as_str().to_string(),
-            time_range_start: time_range.as_ref().map(|range| range.start),
-            time_range_end: time_range.as_ref().map(|range| range.end),
-            tags_serialized_json,
-        };
+
+        let request = ListSplitsRequest { filter_json };
         let response = self
-            .0
+            .underlying
             .clone()
             .list_splits(request)
             .await
@@ -298,7 +293,7 @@ impl Metastore for MetastoreGrpcClient {
         let splits: Vec<Split> =
             serde_json::from_str(&response.splits_serialized_json).map_err(|error| {
                 MetastoreError::JsonDeserializeError {
-                    name: "Vec<Split>".to_string(),
+                    struct_name: "Vec<Split>".to_string(),
                     message: error.to_string(),
                 }
             })?;
@@ -311,7 +306,7 @@ impl Metastore for MetastoreGrpcClient {
             index_id: index_id.to_string(),
         };
         let response = self
-            .0
+            .underlying
             .clone()
             .list_all_splits(request)
             .await
@@ -320,7 +315,7 @@ impl Metastore for MetastoreGrpcClient {
         let splits: Vec<Split> =
             serde_json::from_str(&response.splits_serialized_json).map_err(|error| {
                 MetastoreError::JsonDeserializeError {
-                    name: "Vec<Split>".to_string(),
+                    struct_name: "Vec<Split>".to_string(),
                     message: error.to_string(),
                 }
             })?;
@@ -341,7 +336,7 @@ impl Metastore for MetastoreGrpcClient {
             index_id: index_id.to_string(),
             split_ids: split_ids_vec,
         };
-        self.0
+        self.underlying
             .clone()
             .mark_splits_for_deletion(request)
             .await
@@ -364,7 +359,7 @@ impl Metastore for MetastoreGrpcClient {
             index_id: index_id.to_string(),
             split_ids: split_ids_vec,
         };
-        self.0
+        self.underlying
             .clone()
             .delete_splits(request)
             .await
@@ -377,14 +372,14 @@ impl Metastore for MetastoreGrpcClient {
     async fn add_source(&self, index_id: &str, source: SourceConfig) -> MetastoreResult<()> {
         let source_config_serialized_json =
             serde_json::to_string(&source).map_err(|error| MetastoreError::JsonSerializeError {
-                name: "SourceConfig".to_string(),
+                struct_name: "SourceConfig".to_string(),
                 message: error.to_string(),
             })?;
         let request = AddSourceRequest {
             index_id: index_id.to_string(),
             source_config_serialized_json,
         };
-        self.0
+        self.underlying
             .clone()
             .add_source(request)
             .await
@@ -405,7 +400,7 @@ impl Metastore for MetastoreGrpcClient {
             source_id: source_id.to_string(),
             enable,
         };
-        self.0
+        self.underlying
             .clone()
             .toggle_source(request)
             .await
@@ -420,7 +415,7 @@ impl Metastore for MetastoreGrpcClient {
             index_id: index_id.to_string(),
             source_id: source_id.to_string(),
         };
-        self.0
+        self.underlying
             .clone()
             .delete_source(request)
             .await
@@ -439,7 +434,7 @@ impl Metastore for MetastoreGrpcClient {
             index_id: index_id.to_string(),
             source_id: source_id.to_string(),
         };
-        self.0
+        self.underlying
             .clone()
             .reset_source_checkpoint(request)
             .await
@@ -453,7 +448,7 @@ impl Metastore for MetastoreGrpcClient {
             index_id: index_id.to_string(),
         };
         let response = self
-            .0
+            .underlying
             .clone()
             .last_delete_opstamp(request)
             .await
@@ -464,7 +459,7 @@ impl Metastore for MetastoreGrpcClient {
 
     async fn create_delete_task(&self, delete_query: DeleteQuery) -> MetastoreResult<DeleteTask> {
         let response = self
-            .0
+            .underlying
             .clone()
             .create_delete_task(delete_query)
             .await
@@ -488,7 +483,7 @@ impl Metastore for MetastoreGrpcClient {
             split_ids: split_ids_vec,
             delete_opstamp,
         };
-        self.0
+        self.underlying
             .clone()
             .update_splits_delete_opstamp(request)
             .await
@@ -507,7 +502,7 @@ impl Metastore for MetastoreGrpcClient {
             opstamp_start,
         };
         let response = self
-            .0
+            .underlying
             .clone()
             .list_delete_tasks(request)
             .await
@@ -533,7 +528,7 @@ impl Metastore for MetastoreGrpcClient {
             num_splits: num_splits as u64,
         };
         let response = self
-            .0
+            .underlying
             .clone()
             .list_stale_splits(request)
             .await
@@ -542,87 +537,12 @@ impl Metastore for MetastoreGrpcClient {
         let splits: Vec<Split> =
             serde_json::from_str(&response.splits_serialized_json).map_err(|error| {
                 MetastoreError::JsonDeserializeError {
-                    name: "Vec<Split>".to_string(),
+                    struct_name: "Vec<Split>".to_string(),
                     message: error.to_string(),
                 }
             })?;
         Ok(splits)
     }
-}
-
-fn get_metastore_grpc_addresses(members: &[ClusterMember]) -> HashSet<SocketAddr> {
-    members
-        .iter()
-        .filter(|member| {
-            member
-                .available_services
-                .contains(&QuickwitService::Metastore)
-        })
-        .map(|member| member.grpc_advertise_addr)
-        .collect()
-}
-
-/// Updates channel endpoints by:
-/// - Sending `Change::Insert` grpc addresses not already present in `grpc_addresses_in_use`.
-/// - Sending `Change::Remove` event on grpc addresses present in `grpc_addresses_in_use` but not in
-///   `updated_members`.
-async fn update_channel_endpoints(
-    new_grpc_addresses: &HashSet<SocketAddr>,
-    grpc_addresses_in_use: &HashSet<SocketAddr>,
-    endpoint_channel_rx: &Sender<Change<SocketAddr, Endpoint>>,
-) -> anyhow::Result<()> {
-    if new_grpc_addresses.is_empty() {
-        error!("No Metastore service is available in the cluster.");
-    }
-
-    let leaving_grpc_addresses = grpc_addresses_in_use
-        .difference(new_grpc_addresses)
-        .into_iter()
-        .collect_vec();
-    if !leaving_grpc_addresses.is_empty() {
-        info!(
-            addresses=?leaving_grpc_addresses,
-            "Removing gRPC addresses from `MetastoreGrpcClient`.",
-        );
-    }
-
-    for leaving_grpc_address in leaving_grpc_addresses {
-        endpoint_channel_rx
-            .send(Change::Remove(*leaving_grpc_address))
-            .await?;
-    }
-
-    let new_grpc_addresses = new_grpc_addresses
-        .difference(grpc_addresses_in_use)
-        .into_iter()
-        .collect_vec();
-    if !new_grpc_addresses.is_empty() {
-        info!(
-            addresses=?new_grpc_addresses,
-            "Adding gRPC addresses to `MetastoreGrpcClient`.",
-        );
-    }
-
-    for new_grpc_address in new_grpc_addresses {
-        let new_grpc_uri_result = Uri::builder()
-            .scheme("http")
-            .authority(new_grpc_address.to_string().as_str())
-            .path_and_query("/")
-            .build();
-        if let Ok(new_grpc_uri) = new_grpc_uri_result {
-            let new_grpc_endpoint = Endpoint::from(new_grpc_uri);
-            endpoint_channel_rx
-                .send(Change::Insert(*new_grpc_address, new_grpc_endpoint))
-                .await?;
-        } else {
-            error!(
-                "Cannot build `Uri` from socket address `{}`, address ignored.",
-                new_grpc_address
-            );
-        }
-    }
-
-    Ok(())
 }
 
 /// Parse tonic error and returns [`MetastoreError`].
@@ -715,10 +635,11 @@ mod tests {
         address: SocketAddr,
         metastore: Arc<dyn Metastore>,
     ) -> anyhow::Result<()> {
-        let grpc_adpater = GrpcMetastoreAdapter::from(metastore);
         tokio::spawn(async move {
+            let grpc_adpater = GrpcMetastoreAdapter::from(metastore);
+            let service = MetastoreApiServiceServer::new(grpc_adpater);
             Server::builder()
-                .add_service(MetastoreApiServiceServer::new(grpc_adpater))
+                .add_service(service)
                 .serve(address)
                 .await?;
             Result::<_, anyhow::Error>::Ok(())
@@ -749,52 +670,62 @@ mod tests {
         let metastore_service_member = ClusterMember::new(
             "1".to_string(),
             0,
-            metastore_service_grpc_addr,
             HashSet::from([QuickwitService::Metastore, QuickwitService::Indexer]),
             metastore_service_grpc_addr,
+            metastore_service_grpc_addr,
+            None,
         );
         let searcher_member = ClusterMember::new(
             "2".to_string(),
             0,
-            searcher_grpc_addr,
             HashSet::from([QuickwitService::Searcher]),
             searcher_grpc_addr,
+            searcher_grpc_addr,
+            None,
         );
         let (members_tx, members_rx) =
             watch::channel::<Vec<ClusterMember>>(vec![metastore_service_member.clone()]);
         let watch_members = WatchStream::new(members_rx);
-        let metastore_client = MetastoreGrpcClient::create_and_update_from_members(watch_members)
-            .await
-            .unwrap();
+        let mut metastore_client =
+            MetastoreGrpcClient::create_and_update_from_members(1, watch_members)
+                .await
+                .unwrap();
 
+        assert_eq!(
+            metastore_client.uri().to_string(),
+            "grpc://metastore.service.cluster:1"
+        );
         // gRPC service should send request on the running server.
-        let result = metastore_client.index_metadata(index_id).await;
-        assert!(result.is_ok());
+        metastore_client.pool_size_rx.changed().await.unwrap();
+        assert_eq!(*metastore_client.pool_size_rx.borrow(), 1);
+        metastore_client.check_connectivity().await.unwrap();
+        metastore_client.index_metadata(index_id).await.unwrap();
 
         // Send empty vec to signal that there is no more control plane in the cluster.
-        let _ = members_tx.send(Vec::new());
-        let err = metastore_client.index_metadata(index_id).await.unwrap_err();
+        members_tx.send(Vec::new()).unwrap();
+        metastore_client.pool_size_rx.changed().await.unwrap();
+        assert_eq!(*metastore_client.pool_size_rx.borrow(), 0);
+        metastore_client.check_connectivity().await.unwrap_err();
+        let error = metastore_client.index_metadata(index_id).await.unwrap_err();
         assert!(
-            matches!(err, MetastoreError::ConnectionError { message } if message.starts_with("gRPC request timeout triggered by the channel timeout"))
+            matches!(error, MetastoreError::ConnectionError { message } if message.starts_with("gRPC request timeout triggered by the channel timeout"))
         );
 
         // Send control plan member and check it's working again.
-        let _ = members_tx.send(vec![metastore_service_member.clone()]);
-        let result = metastore_client.index_metadata(index_id).await;
-        assert!(result.is_ok());
+        members_tx
+            .send(vec![metastore_service_member.clone()])
+            .unwrap();
+        metastore_client.index_metadata(index_id).await.unwrap();
 
         // Send searcher member only.
-        let _ = members_tx.send(vec![searcher_member.clone()]);
-        let result = metastore_client.index_metadata(index_id).await;
-        assert!(result.is_err());
+        members_tx.send(vec![searcher_member.clone()]).unwrap();
+        metastore_client.index_metadata(index_id).await.unwrap_err();
 
         // Send control plane + searcher members.
-        let _ = members_tx.send(vec![
-            metastore_service_member.clone(),
-            searcher_member.clone(),
-        ]);
-        let result = metastore_client.index_metadata(index_id).await;
-        assert!(result.is_ok());
+        members_tx
+            .send(vec![metastore_service_member, searcher_member])
+            .unwrap();
+        metastore_client.index_metadata(index_id).await.unwrap();
         Ok(())
     }
 
@@ -811,57 +742,71 @@ mod tests {
                     "ram:///indexes/test-index",
                 ))
             });
+        let metastore = Arc::new(metastore);
 
         let grpc_port_1 = quickwit_common::net::find_available_tcp_port()?;
         let grpc_addr_1: SocketAddr = ([127, 0, 0, 1], grpc_port_1).into();
-        let grpc_addr_2: SocketAddr = ([127, 0, 0, 1], grpc_port_1 + 1).into();
-        let grpc_addr_3: SocketAddr = ([127, 0, 0, 1], grpc_port_1 - 1).into();
-        // Only one grpc socket will work.
-        start_grpc_server(grpc_addr_1, Arc::new(metastore)).await?;
+        let grpc_addr_2: SocketAddr = ([127, 0, 0, 1], 1234).into();
+        let grpc_addr_3: SocketAddr = ([127, 0, 0, 1], 4567).into();
+
+        // Only start metastore member 1.
+        start_grpc_server(grpc_addr_1, metastore.clone()).await?;
 
         let metastore_member_1 = ClusterMember::new(
             "1".to_string(),
             0,
-            grpc_addr_1,
             HashSet::from([QuickwitService::Metastore]),
             grpc_addr_1,
+            grpc_addr_1,
+            None,
         );
         let metastore_member_2 = ClusterMember::new(
             "2".to_string(),
             0,
-            grpc_addr_2,
             HashSet::from([QuickwitService::Metastore]),
             grpc_addr_2,
+            grpc_addr_2,
+            None,
         );
         let metastore_member_3 = ClusterMember::new(
             "3".to_string(),
             0,
-            grpc_addr_3,
             HashSet::from([QuickwitService::Metastore]),
             grpc_addr_3,
+            grpc_addr_3,
+            None,
         );
         let (members_tx, members_rx) =
             watch::channel::<Vec<ClusterMember>>(vec![metastore_member_1.clone()]);
         let watch_members = WatchStream::new(members_rx);
-        let metastore_client = MetastoreGrpcClient::create_and_update_from_members(watch_members)
-            .await
+        let mut metastore_client =
+            MetastoreGrpcClient::create_and_update_from_members(1, watch_members)
+                .await
+                .unwrap();
+
+        metastore_client.pool_size_rx.changed().await.unwrap();
+        assert_eq!(*metastore_client.pool_size_rx.borrow(), 1);
+        metastore_client.index_metadata(index_id).await.unwrap();
+
+        // Send two unavailable metastore members.
+        members_tx
+            .send(vec![metastore_member_2, metastore_member_3])
             .unwrap();
 
-        let result = metastore_client.index_metadata(index_id).await;
-        assert!(result.is_ok());
+        metastore_client.pool_size_rx.changed().await.unwrap();
+        assert_eq!(*metastore_client.pool_size_rx.borrow(), 2);
 
-        // Send the three metastore members
-        let _ = members_tx.send(vec![metastore_member_2.clone(), metastore_member_3.clone()]);
-        let err = metastore_client.index_metadata(index_id).await.unwrap_err();
-        assert!(err
+        let error = metastore_client.index_metadata(index_id).await.unwrap_err();
+        assert!(error
             .to_string()
             .contains("tcp connect error: Connection refused"));
 
-        // Send the running metastore member.
-        let _ = members_tx.send(vec![metastore_member_1.clone()]);
-        let result = metastore_client.index_metadata(index_id).await;
-        assert!(result.is_ok());
+        // Send running metastore member.
+        members_tx.send(vec![metastore_member_1]).unwrap();
 
+        metastore_client.pool_size_rx.changed().await.unwrap();
+        assert_eq!(*metastore_client.pool_size_rx.borrow(), 1);
+        metastore_client.index_metadata(index_id).await.unwrap();
         Ok(())
     }
 
@@ -890,11 +835,8 @@ mod tests {
             .await
             .unwrap();
 
-        let index_metadata_result = metastore_client.index_metadata(index_id).await;
-        assert!(index_metadata_result.is_ok());
-        let list_all_splits_result = metastore_client.list_all_splits(index_id).await;
-        assert!(list_all_splits_result.is_ok());
-
+        metastore_client.index_metadata(index_id).await.unwrap();
+        metastore_client.list_all_splits(index_id).await.unwrap();
         Ok(())
     }
 }

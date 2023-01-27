@@ -18,10 +18,23 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 #![allow(clippy::derive_partial_eq_without_eq)]
+#![deny(clippy::disallowed_methods)]
+
+#![allow(rustdoc::invalid_html_tags)]
 
 mod quickwit;
+mod quickwit_control_plane_api;
+mod quickwit_indexing_api;
 mod quickwit_ingest_api;
 mod quickwit_metastore_api;
+
+pub mod control_plane_api {
+    pub use crate::quickwit_control_plane_api::*;
+}
+
+pub mod indexing_api {
+    pub use crate::quickwit_indexing_api::*;
+}
 
 pub mod ingest_api {
     pub use crate::quickwit_ingest_api::*;
@@ -100,9 +113,17 @@ extern crate serde;
 use std::convert::Infallible;
 use std::fmt;
 
+use ::opentelemetry::global;
 pub use quickwit::*;
+use quickwit_metastore_api::DeleteQuery;
 pub use tonic;
+use tonic::Status;
 use tonic::codegen::http;
+use tonic::service::Interceptor;
+use tracing::Span;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use ::opentelemetry::propagation::Injector;
+use ::opentelemetry::propagation::Extractor;
 
 /// This enum serves as a Rosetta stone of
 /// gRPC and Http status code.
@@ -115,6 +136,7 @@ pub enum ServiceErrorCode {
     MethodNotAllowed,
     UnsupportedMediaType,
     BadRequest,
+    RateLimited,
 }
 
 impl ServiceErrorCode {
@@ -125,6 +147,7 @@ impl ServiceErrorCode {
             ServiceErrorCode::BadRequest => tonic::Code::InvalidArgument,
             ServiceErrorCode::MethodNotAllowed => tonic::Code::InvalidArgument,
             ServiceErrorCode::UnsupportedMediaType => tonic::Code::InvalidArgument,
+            ServiceErrorCode::RateLimited => tonic::Code::ResourceExhausted,
         }
     }
     pub fn to_http_status_code(self) -> http::StatusCode {
@@ -134,6 +157,7 @@ impl ServiceErrorCode {
             ServiceErrorCode::BadRequest => http::StatusCode::BAD_REQUEST,
             ServiceErrorCode::MethodNotAllowed => http::StatusCode::METHOD_NOT_ALLOWED,
             ServiceErrorCode::UnsupportedMediaType => http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            ServiceErrorCode::RateLimited => http::StatusCode::TOO_MANY_REQUESTS,
         }
     }
 }
@@ -179,8 +203,102 @@ impl From<SearchStreamRequest> for SearchRequest {
     }
 }
 
+impl From<DeleteQuery> for SearchRequest {
+    fn from(delete_query: DeleteQuery) -> Self {
+        Self {
+            index_id: delete_query.index_id,
+            query: delete_query.query,
+            start_timestamp: delete_query.start_timestamp,
+            end_timestamp: delete_query.end_timestamp,
+            search_fields: delete_query.search_fields,
+            ..Default::default()
+        }
+    }
+}
+
 impl fmt::Display for SplitSearchError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "({}, split_id: {})", self.error, self.split_id)
     }
+}
+
+/// `MutMetadataMap` used to extract [`tonic::metadata::MetadataMap`] from a request. 
+pub struct MutMetadataMap<'a>(&'a mut tonic::metadata::MetadataMap);
+
+impl<'a> Injector for MutMetadataMap<'a> {
+    /// Sets a key-value pair in the [`MetadataMap`]. No-op if the key or value is invalid.
+    fn set(&mut self, key: &str, value: String) {
+        if let Ok(metadata_key) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes()) {
+            if let Ok(metadata_value) = tonic::metadata::MetadataValue::try_from(&value) {
+                self.0.insert(metadata_key, metadata_value);
+            }
+        }
+    }
+}
+
+impl<'a> Extractor for MutMetadataMap<'a> {
+    /// Gets a value for a key from the MetadataMap.  If the value can't be converted to &str,
+    /// returns None.
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|metadata| metadata.to_str().ok())
+    }
+
+    /// Collect all the keys from the MetadataMap.
+    fn keys(&self) -> Vec<&str> {
+        self.0
+            .keys()
+            .map(|key| match key {
+                tonic::metadata::KeyRef::Ascii(v) => v.as_str(),
+                tonic::metadata::KeyRef::Binary(v) => v.as_str(),
+            })
+            .collect::<Vec<_>>()
+    }
+}
+
+/// [`tonic::service::interceptor::Interceptor`] which injects the span context into [`tonic::metadata::MetadataMap`].
+#[derive(Clone, Debug)]
+pub struct SpanContextInterceptor;
+
+impl Interceptor for SpanContextInterceptor {
+    fn call(&mut self, mut request: tonic::Request<()>) -> Result<tonic::Request<()>, Status> {
+        global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(
+                &tracing::Span::current().context(),
+                &mut MutMetadataMap(request.metadata_mut()),
+            )
+        });
+        Ok(request)
+    }
+}
+
+
+/// `MetadataMap` extracts OpenTelemetry
+/// tracing keys from request's headers.
+struct MetadataMap<'a>(&'a tonic::metadata::MetadataMap);
+
+impl<'a> Extractor for MetadataMap<'a> {
+    /// Gets a value for a key from the MetadataMap.  If the value can't be converted to &str,
+    /// returns None.
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|metadata| metadata.to_str().ok())
+    }
+
+    /// Collect all the keys from the MetadataMap.
+    fn keys(&self) -> Vec<&str> {
+        self.0
+            .keys()
+            .map(|key| match key {
+                tonic::metadata::KeyRef::Ascii(v) => v.as_str(),
+                tonic::metadata::KeyRef::Binary(v) => v.as_str(),
+            })
+            .collect::<Vec<_>>()
+    }
+}
+
+
+/// Sets parent span context derived from [`tonic::metadata::MetadataMap`].
+pub fn set_parent_span_from_request_metadata(request_metadata: &tonic::metadata::MetadataMap) {
+    let parent_cx =
+    global::get_text_map_propagator(|prop| prop.extract(&MetadataMap(request_metadata)));
+    Span::current().set_parent(parent_cx);
 }

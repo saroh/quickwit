@@ -17,17 +17,16 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-use std::any::Any;
-use std::borrow::Borrow;
 use std::fmt;
 
 use serde::Serialize;
 use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
 use tracing::error;
 
 use crate::actor_state::ActorState;
+use crate::command::Observe;
+use crate::mailbox::Priority;
 use crate::observation::ObservationType;
 use crate::{Actor, ActorContext, ActorExitStatus, Command, Mailbox, Observation};
 
@@ -49,6 +48,10 @@ pub enum Health {
     Success,
 }
 
+/// Message received by health probe handlers.
+#[derive(Clone, Debug)]
+pub struct Healthz;
+
 impl<A: Actor> fmt::Debug for ActorHandle<A> {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
         formatter
@@ -60,7 +63,7 @@ impl<A: Actor> fmt::Debug for ActorHandle<A> {
 
 pub trait Supervisable {
     fn name(&self) -> &str;
-    fn health(&self) -> Health;
+    fn harvest_health(&self) -> Health;
 }
 
 impl<A: Actor> Supervisable for ActorHandle<A> {
@@ -68,7 +71,11 @@ impl<A: Actor> Supervisable for ActorHandle<A> {
         self.actor_context.actor_instance_id()
     }
 
-    fn health(&self) -> Health {
+    /// Harvests the health of the actor by checking its state (see [`ActorState`]) and/or progress
+    /// (see `Progress`). When the actor is running, calling this method resets its progress state
+    /// to "no update" (see `ProgressState`). As a consequence, only one supervisor or probe
+    /// should periodically invoke this method during the lifetime of the actor.
+    fn harvest_health(&self) -> Health {
         let actor_state = self.state();
         if actor_state == ActorState::Success {
             Health::Success
@@ -115,23 +122,41 @@ impl<A: Actor> ActorHandle<A> {
     ///
     /// This method timeout if reaching the end of the message takes more than an HEARTBEAT.
     pub async fn process_pending_and_observe(&self) -> Observation<A::ObservableState> {
-        let (tx, rx) = oneshot::channel();
-        if !self.actor_context.state().is_exit()
-            && self
+        self.observe_with_priority(Priority::Low).await
+    }
+
+    /// Observe the current state.
+    ///
+    /// The observation will be scheduled as a high priority message, therefore it will be executed
+    /// after the current active message and the current command queue have been processed.
+    pub async fn observe(&self) -> Observation<A::ObservableState> {
+        self.observe_with_priority(Priority::High).await
+    }
+
+    async fn observe_with_priority(&self, priority: Priority) -> Observation<A::ObservableState> {
+        if !self.actor_context.state().is_exit() {
+            if let Ok(oneshot_rx) = self
                 .actor_context
                 .mailbox()
-                .send_message(Command::Observe(tx))
+                .send_message_with_priority(Observe, priority)
                 .await
-                .is_err()
-        {
-            error!(
-                actor = self.actor_context.actor_instance_id(),
-                "Failed to send observe message"
-            );
+            {
+                // The timeout is required here. If the actor fails, its inbox is properly dropped
+                // but the send channel might actually prevent the onechannel
+                // Receiver from being dropped.
+                return self.wait_for_observable_state_callback(oneshot_rx).await;
+            } else {
+                error!(
+                    actor_id = self.actor_context.actor_instance_id(),
+                    "Failed to send observe message"
+                );
+            }
         }
-        // The timeout is required here. If the actor fails, its inbox is properly dropped but the
-        // send channel might actually prevent the onechannel Receiver from being dropped.
-        self.wait_for_observable_state_callback(rx).await
+        let state = self.last_observation();
+        Observation {
+            obs_type: ObservationType::PostMortem,
+            state,
+        }
     }
 
     /// Pauses the actor. The actor will stop processing messages from the low priority
@@ -194,47 +219,19 @@ impl<A: Actor> ActorHandle<A> {
         (exit_status, observation)
     }
 
-    /// Observe the current state.
-    ///
-    /// The observation will be scheduled as a high priority message, therefore it will be executed
-    /// after the current active message and the current command queue have been processed.
-    pub async fn observe(&self) -> Observation<A::ObservableState> {
-        let (tx, rx) = oneshot::channel();
-        if self.actor_context.state().is_exit() {
-            let state = self.last_observation().borrow().clone();
-            return Observation {
-                obs_type: ObservationType::PostMortem,
-                state,
-            };
-        }
-        if self
-            .actor_context
-            .mailbox()
-            .send_message_with_high_priority(Command::Observe(tx))
-            .is_err()
-        {
-            error!(
-                actor_id = self.actor_context.actor_instance_id(),
-                "Failed to send observe message"
-            );
-        }
-        self.wait_for_observable_state_callback(rx).await
-    }
-
     pub fn last_observation(&self) -> A::ObservableState {
         self.last_state.borrow().clone()
     }
 
     async fn wait_for_observable_state_callback(
         &self,
-        rx: oneshot::Receiver<Box<dyn Any + Send>>,
+        rx: oneshot::Receiver<A::ObservableState>,
     ) -> Observation<A::ObservableState> {
-        let observable_state_or_timeout = timeout(crate::HEARTBEAT, rx).await;
+        let scheduler_client = &self.actor_context.spawn_ctx().scheduler_client;
+        let observable_state_or_timeout =
+            scheduler_client.timeout(crate::OBSERVE_TIMEOUT, rx).await;
         match observable_state_or_timeout {
-            Ok(Ok(observable_state_any)) => {
-                let state: A::ObservableState = *observable_state_any
-                    .downcast()
-                    .expect("The type is guaranteed logically by the ActorHandle.");
+            Ok(Ok(state)) => {
                 let obs_type = ObservationType::Alive;
                 Observation { obs_type, state }
             }
@@ -326,7 +323,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_panic_in_actor() -> anyhow::Result<()> {
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let (mailbox, handle) = universe.spawn_builder().spawn(PanickingActor::default());
         mailbox.send_message(Panic).await?;
         let (exit_status, count) = handle.join().await;
@@ -337,7 +334,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_exit() -> anyhow::Result<()> {
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let (mailbox, handle) = universe.spawn_builder().spawn(ExitActor::default());
         mailbox.send_message(Exit).await?;
         let (exit_status, count) = handle.join().await;

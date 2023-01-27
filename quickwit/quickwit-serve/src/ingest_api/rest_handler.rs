@@ -18,19 +18,30 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 use std::collections::HashMap;
-use std::convert::Infallible;
 
 use bytes::Bytes;
 use quickwit_actors::Mailbox;
 use quickwit_ingest_api::{add_doc, IngestApiService};
 use quickwit_proto::ingest_api::{DocBatch, IngestRequest, TailRequest};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::Value as JsonValue;
 use thiserror::Error;
 use warp::{reject, Filter, Rejection};
 
 use crate::format::FormatError;
 use crate::{require, Format};
+
+#[derive(utoipa::OpenApi)]
+#[openapi(paths(ingest, tail_endpoint, elastic_ingest,))]
+pub struct IngestApi;
+
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(
+    quickwit_proto::ingest_api::DocBatch,
+    quickwit_proto::ingest_api::FetchResponse,
+    quickwit_proto::ingest_api::IngestResponse,
+)))]
+pub struct IngestApiSchemas;
 
 #[derive(Debug, Error)]
 #[error("Body is not utf-8.")]
@@ -82,10 +93,10 @@ struct BulkActionMeta {
 
 pub fn ingest_handler(
     ingest_api_mailbox_opt: Option<Mailbox<IngestApiService>>,
-) -> impl Filter<Extract = impl warp::Reply, Error = Rejection> + Clone {
+) -> impl Filter<Extract = (impl warp::Reply,), Error = Rejection> + Clone {
     ingest_filter()
         .and(require(ingest_api_mailbox_opt))
-        .and_then(ingest)
+        .then(ingest)
 }
 
 fn ingest_filter() -> impl Filter<Extract = (String, String), Error = Rejection> + Clone {
@@ -93,7 +104,7 @@ fn ingest_filter() -> impl Filter<Extract = (String, String), Error = Rejection>
         .and(warp::post())
         .and(warp::body::content_length_limit(CONTENT_LENGTH_LIMIT))
         .and(warp::body::bytes().and_then(|body: Bytes| async move {
-            if let Ok(body_str) = std::str::from_utf8(&*body) {
+            if let Ok(body_str) = std::str::from_utf8(&body) {
                 Ok(body_str.to_string())
             } else {
                 Err(reject::custom(InvalidUtf8))
@@ -111,11 +122,24 @@ fn lines(body: &str) -> impl Iterator<Item = &str> {
     })
 }
 
+#[utoipa::path(
+    post,
+    tag = "Ingest",
+    path = "{index_id}/ingest",
+    request_body(content = String, description = "Documents to ingest in NDJSON format and limited to 10MB", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Successfully ingested documents.", body = IngestResponse)
+    ),
+    params(
+        ("index_id" = String, Path, description = "The index ID to add docs to."),
+    )
+)]
+/// Ingest documents
 async fn ingest(
     index_id: String,
     payload: String,
     ingest_api_mailbox: Mailbox<IngestApiService>,
-) -> Result<impl warp::Reply, Infallible> {
+) -> impl warp::Reply {
     let mut doc_batch = DocBatch {
         index_id,
         ..Default::default()
@@ -130,30 +154,43 @@ async fn ingest(
         .ask_for_res(ingest_req)
         .await
         .map_err(FormatError::wrap);
-    Ok(Format::PrettyJson.make_rest_reply(ingest_resp))
+    Format::PrettyJson.make_rest_reply(ingest_resp)
 }
 
 pub fn tail_handler(
     ingest_api_mailbox_opt: Option<Mailbox<IngestApiService>>,
-) -> impl Filter<Extract = impl warp::Reply, Error = Rejection> + Clone {
+) -> impl Filter<Extract = (impl warp::Reply,), Error = Rejection> + Clone {
     tail_filter()
         .and(require(ingest_api_mailbox_opt))
-        .and_then(tail_endpoint)
+        .then(tail_endpoint)
 }
 
 fn tail_filter() -> impl Filter<Extract = (String,), Error = Rejection> + Clone {
     warp::path!(String / "fetch").and(warp::get())
 }
 
+#[utoipa::path(
+    post,
+    tag = "Ingest",
+    path = "{index_id}/fetch",
+    request_body = String,
+    responses(
+        (status = 200, description = "Successfully fetched documents.", body = FetchResponse)
+    ),
+    params(
+        ("index_id" = String, Path, description = "The index ID to tail."),
+    )
+)]
+/// Tail
 async fn tail_endpoint(
     index_id: String,
     ingest_api_service: Mailbox<IngestApiService>,
-) -> Result<impl warp::Reply, Infallible> {
+) -> impl warp::Reply {
     let tail_res = ingest_api_service
         .ask_for_res(TailRequest { index_id })
         .await
         .map_err(FormatError::wrap);
-    Ok(Format::PrettyJson.make_rest_reply(tail_res))
+    Format::PrettyJson.make_rest_reply(tail_res)
 }
 
 fn elastic_bulk_filter() -> impl Filter<Extract = (String,), Error = Rejection> + Clone {
@@ -161,7 +198,7 @@ fn elastic_bulk_filter() -> impl Filter<Extract = (String,), Error = Rejection> 
         .and(warp::post())
         .and(warp::body::content_length_limit(CONTENT_LENGTH_LIMIT))
         .and(warp::body::bytes().and_then(|body: Bytes| async move {
-            if let Ok(body_str) = std::str::from_utf8(&*body) {
+            if let Ok(body_str) = std::str::from_utf8(&body) {
                 Ok(body_str.to_string())
             } else {
                 Err(reject::custom(InvalidUtf8))
@@ -171,12 +208,22 @@ fn elastic_bulk_filter() -> impl Filter<Extract = (String,), Error = Rejection> 
 
 pub fn elastic_bulk_handler(
     ingest_api_mailbox_opt: Option<Mailbox<IngestApiService>>,
-) -> impl Filter<Extract = impl warp::Reply, Error = Rejection> + Clone {
+) -> impl Filter<Extract = (impl warp::Reply,), Error = Rejection> + Clone {
     elastic_bulk_filter()
         .and(require(ingest_api_mailbox_opt))
         .and_then(elastic_ingest)
 }
 
+#[utoipa::path(
+    post,
+    tag = "Ingest",
+    path = "/_bulk",
+    request_body(content = String, description = "Elasticsearch compatible bulk resquest body limited to 10MB", content_type = "application/json"),
+    responses(
+        (status = 200, description = "Successfully ingested documents.", body = IngestResponse)
+    ),
+)]
+/// Elasticsearch Bulk Ingest
 async fn elastic_ingest(
     payload: String,
     ingest_api_mailbox: Mailbox<IngestApiService>,
@@ -193,7 +240,7 @@ async fn elastic_ingest(
                 BulkApiError::InvalidSource("Expected source for the action.".to_string())
             })
             .and_then(|source| {
-                serde_json::from_str::<Value>(source)
+                serde_json::from_str::<JsonValue>(source)
                     .map_err(|err| BulkApiError::InvalidSource(err.to_string()))
             })?;
 
@@ -207,7 +254,7 @@ async fn elastic_ingest(
     }
 
     let ingest_req = IngestRequest {
-        doc_batches: batches.into_iter().map(|(_, batch)| batch).collect(),
+        doc_batches: batches.into_values().collect(),
     };
     let ingest_resp = ingest_api_mailbox
         .ask_for_res(ingest_req)

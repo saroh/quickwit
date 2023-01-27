@@ -21,21 +21,23 @@ mod grpc_adapter;
 mod rest_handler;
 
 pub use self::grpc_adapter::GrpcSearchAdapter;
-pub use self::rest_handler::{search_get_handler, search_post_handler, search_stream_handler};
+pub use self::rest_handler::{
+    search_get_handler, search_post_handler, search_stream_handler, SearchApi,
+};
 
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
-    use std::ops::Range;
     use std::sync::Arc;
 
     use futures::TryStreamExt;
+    use quickwit_grpc_clients::service_client_pool::ServiceClientPool;
     use quickwit_indexing::mock_split;
-    use quickwit_metastore::{IndexMetadata, MockMetastore, SplitState};
+    use quickwit_metastore::{IndexMetadata, MockMetastore};
     use quickwit_proto::search_service_server::SearchServiceServer;
     use quickwit_proto::{tonic, OutputFormat};
     use quickwit_search::{
-        root_search_stream, ClusterClient, MockSearchService, SearchClientPool, SearchError,
+        root_search_stream, ClusterClient, MockSearchService, SearchError, SearchJobPlacer,
         SearchService,
     };
     use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -81,11 +83,9 @@ mod tests {
                     "ram:///indexes/test-index",
                 ))
             });
-        metastore.expect_list_splits().returning(
-            |_index_id: &str, _split_state: SplitState, _time_range: Option<Range<i64>>, _tags| {
-                Ok(vec![mock_split("split_1"), mock_split("split_2")])
-            },
-        );
+        metastore
+            .expect_list_splits()
+            .returning(|_filter| Ok(vec![mock_split("split_1"), mock_split("split_2")]));
         let mut mock_search_service = MockSearchService::new();
         let (result_sender, result_receiver) = tokio::sync::mpsc::unbounded_channel();
         result_sender.send(Ok(quickwit_proto::LeafSearchStreamResponse {
@@ -118,9 +118,11 @@ mod tests {
 
         let grpc_addr: SocketAddr = "127.0.0.1:20000".parse()?;
         start_test_server(grpc_addr, Arc::new(mock_search_service)).await?;
-        let client_pool = SearchClientPool::for_addrs(&[grpc_addr]).await?;
-        let cluster_client = ClusterClient::new(client_pool.clone());
-        let stream = root_search_stream(request, &metastore, cluster_client, &client_pool).await?;
+        let client_pool = ServiceClientPool::for_addrs(&[grpc_addr]).await.unwrap();
+        let search_job_placer = SearchJobPlacer::new(client_pool);
+        let cluster_client = ClusterClient::new(search_job_placer.clone());
+        let stream =
+            root_search_stream(request, &metastore, cluster_client, &search_job_placer).await?;
         let result: Result<Vec<_>, SearchError> = stream.try_collect().await;
         assert!(result.is_err());
         assert_eq!(

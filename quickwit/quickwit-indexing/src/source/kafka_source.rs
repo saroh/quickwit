@@ -33,13 +33,13 @@ use quickwit_metastore::checkpoint::{
 };
 use rdkafka::config::{ClientConfig, RDKafkaLogLevel};
 use rdkafka::consumer::{
-    BaseConsumer, Consumer, ConsumerContext, DefaultConsumerContext, Rebalance, RebalanceProtocol,
+    BaseConsumer, Consumer, ConsumerContext, DefaultConsumerContext, Rebalance,
 };
 use rdkafka::error::KafkaError;
 use rdkafka::message::BorrowedMessage;
 use rdkafka::util::Timeout;
 use rdkafka::{ClientContext, Message, Offset, TopicPartitionList};
-use serde_json::json;
+use serde_json::{json, Value as JsonValue};
 use tokio::sync::mpsc;
 use tokio::task::{spawn_blocking, JoinHandle};
 use tokio::time;
@@ -107,13 +107,12 @@ impl From<BorrowedMessage<'_>> for KafkaMessage {
             doc_opt: parse_message_payload(&message),
             payload_len: message.payload_len() as u64,
             partition: message.partition(),
-            offset: message.offset() as i64,
+            offset: message.offset(),
         }
     }
 }
 
 struct RdKafkaContext {
-    group_id: String,
     topic: String,
     events_tx: mpsc::Sender<KafkaEvent>,
 }
@@ -171,11 +170,6 @@ impl ConsumerContext for RdKafkaContext {
                 assignment_rx.recv(),
                 "Failed to receive assignment from source."
             );
-            info!(
-                topic=%self.topic,
-                partitions=%assignment.iter().map(|(partition, _)| partition).join(","),
-                "New partition assignment"
-            );
             for (partition, offset) in assignment {
                 let mut partition = tpl
                     .find_partition(&self.topic, partition)
@@ -225,18 +219,18 @@ pub struct KafkaSource {
     state: KafkaSourceState,
     backfill_mode_enabled: bool,
     events_rx: mpsc::Receiver<KafkaEvent>,
-    consumer: Arc<RdKafkaConsumer>,
     poll_loop_jh: JoinHandle<()>,
     publish_lock: PublishLock,
 }
 
 impl fmt::Debug for KafkaSource {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(
-            f,
-            "KafkaSource {{ source_id: {}, topic: {} }}",
-            self.ctx.source_config.source_id, self.topic
-        )
+    fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter
+            .debug_struct("KafkaSource")
+            .field("index_id", &self.ctx.index_id)
+            .field("source_id", &self.ctx.source_config.source_id)
+            .field("topic", &self.topic)
+            .finish()
     }
 }
 
@@ -251,41 +245,46 @@ impl KafkaSource {
         let backfill_mode_enabled = params.enable_backfill_mode;
 
         let (events_tx, events_rx) = mpsc::channel(100);
-        let consumer = create_consumer(
+        let (client_config, consumer) = create_consumer(
             &ctx.index_id,
             &ctx.source_config.source_id,
             params,
             events_tx.clone(),
         )?;
-        consumer
-            .subscribe(&[&topic])
-            .with_context(|| format!("Failed to subscribe to topic `{topic}`."))?;
-        let poll_loop_jh = spawn_consumer_poll_loop(consumer.clone(), events_tx);
+        let native_client_config = client_config.create_native_config()?;
+        let group_id = native_client_config.get("group.id")?;
+        let session_timeout_ms = native_client_config
+            .get("session.timeout.ms")?
+            .parse::<u64>()?;
+        let max_poll_interval_ms = native_client_config
+            .get("max.poll.interval.ms")?
+            .parse::<u64>()?;
+
+        let poll_loop_jh = spawn_consumer_poll_loop(consumer, topic.clone(), events_tx);
         let publish_lock = PublishLock::default();
 
-        let rebalance_protocol_str = match consumer.rebalance_protocol() {
-            RebalanceProtocol::None => "off group", // The consumer has not joined the group yet.
-            RebalanceProtocol::Eager => "eager",
-            RebalanceProtocol::Cooperative => "cooperative",
-        };
         info!(
             index_id=%ctx.index_id,
             source_id=%ctx.source_config.source_id,
-            group_id=%consumer.client().context().group_id,
             topic=%topic,
-            rebalance_protocol=%rebalance_protocol_str,
+            group_id=%group_id,
+            max_poll_interval_ms=%max_poll_interval_ms,
+            session_timeout_ms=%session_timeout_ms,
             "Starting Kafka source."
         );
-        let state = KafkaSourceState {
-            ..Default::default()
-        };
+        if max_poll_interval_ms <= 60_000 {
+            warn!(
+                "`max.poll.interval.ms` is set to a short duration that may cause the source to \
+                 crash when back pressure from the indexer occurs. The recommended value is \
+                 `300000` (5 minutes)."
+            );
+        }
         Ok(KafkaSource {
             ctx,
             topic,
-            state,
+            state: KafkaSourceState::default(),
             backfill_mode_enabled,
             events_rx,
-            consumer,
             poll_loop_jh,
             publish_lock,
         })
@@ -386,6 +385,13 @@ impl KafkaSource {
                 .insert(partition, current_position);
             next_offsets.push((partition, next_offset));
         }
+        info!(
+            index_id=%self.ctx.index_id,
+            source_id=%self.ctx.source_config.source_id,
+            topic=%self.topic,
+            partitions=?partitions,
+            "New partition assignment after rebalance.",
+        );
         assignment_tx
             .send(next_offsets)
             .map_err(|_| anyhow!("Consumer context was dropped."))?;
@@ -528,11 +534,6 @@ impl Source for KafkaSource {
         _ctx: &SourceContext,
     ) -> anyhow::Result<()> {
         self.poll_loop_jh.abort();
-
-        let consumer = self.consumer.clone();
-        spawn_blocking(move || {
-            consumer.unsubscribe();
-        });
         Ok(())
     }
 
@@ -543,7 +544,7 @@ impl Source for KafkaSource {
         )
     }
 
-    fn observable_state(&self) -> serde_json::Value {
+    fn observable_state(&self) -> JsonValue {
         let assigned_partitions: Vec<&i32> =
             self.state.assigned_partitions.keys().sorted().collect();
         let current_positions: Vec<(&i32, &str)> = self
@@ -574,10 +575,22 @@ impl Source for KafkaSource {
 // blocking tokio task and handle the rebalance events via message passing between the rebalance
 // callback and the source.
 fn spawn_consumer_poll_loop(
-    consumer: Arc<RdKafkaConsumer>,
+    consumer: RdKafkaConsumer,
+    topic: String,
     events_tx: mpsc::Sender<KafkaEvent>,
 ) -> JoinHandle<()> {
     spawn_blocking(move || {
+        // `subscribe()` returns immediately but triggers the execution of synchronous code (e.g.
+        // rebalance callback) so it must be called in a blocking task.
+        //
+        // From the librdkafka docs:
+        // `subscribe()` is an asynchronous method which returns immediately: background threads
+        // will (re)join the group, wait for group rebalance, issue any registered rebalance_cb,
+        // assign() the assigned partitions, and then start fetching messages.
+        if let Err(error) = consumer.subscribe(&[&topic]) {
+            let _ = events_tx.send(KafkaEvent::Error(anyhow!(error)));
+            return;
+        }
         while !events_tx.is_closed() {
             if let Some(message_res) = consumer.poll(Some(Duration::from_secs(1))) {
                 let event = match message_res {
@@ -585,6 +598,12 @@ fn spawn_consumer_poll_loop(
                     Err(KafkaError::PartitionEOF(partition)) => KafkaEvent::PartitionEOF(partition),
                     Err(error) => KafkaEvent::Error(anyhow!(error)),
                 };
+                // When the source experiences backpressure, this channel becomes full and the
+                // consumer might not call `poll()` for a duration that exceeds
+                // `max.poll.interval.ms`. When that happens the consumer is kicked out of the group
+                // and the source fails. This should not happen in practice with a
+                // sufficiently large value for `max.poll.interval.ms`. The defaut value is 5
+                // minutes.
                 if events_tx.blocking_send(event).is_err() {
                     break;
                 }
@@ -640,7 +659,7 @@ fn create_consumer(
     source_id: &str,
     params: KafkaSourceParams,
     events_tx: mpsc::Sender<KafkaEvent>,
-) -> anyhow::Result<Arc<RdKafkaConsumer>> {
+) -> anyhow::Result<(ClientConfig, RdKafkaConsumer)> {
     let mut client_config = parse_client_params(params.client_params)?;
 
     // Group ID is limited to 255 characters.
@@ -657,13 +676,12 @@ fn create_consumer(
         .set("group.id", &group_id)
         .set_log_level(log_level)
         .create_with_context(RdKafkaContext {
-            group_id,
             topic: params.topic,
             events_tx,
         })
         .context("Failed to create Kafka consumer.")?;
 
-    Ok(Arc::new(consumer))
+    Ok((client_config, consumer))
 }
 
 fn parse_client_log_level(client_log_level: Option<String>) -> anyhow::Result<RDKafkaLogLevel> {
@@ -683,8 +701,8 @@ fn parse_client_log_level(client_log_level: Option<String>) -> anyhow::Result<RD
     Ok(log_level)
 }
 
-fn parse_client_params(client_params: serde_json::Value) -> anyhow::Result<ClientConfig> {
-    let params = if let serde_json::Value::Object(params) = client_params {
+fn parse_client_params(client_params: JsonValue) -> anyhow::Result<ClientConfig> {
+    let params = if let JsonValue::Object(params) = client_params {
         params
     } else {
         bail!("Failed to parse Kafka client parameters. `client_params` must be a JSON object.");
@@ -692,11 +710,11 @@ fn parse_client_params(client_params: serde_json::Value) -> anyhow::Result<Clien
     let mut client_config = ClientConfig::new();
     for (key, value_json) in params {
         let value = match value_json {
-            serde_json::Value::Bool(value_bool) => value_bool.to_string(),
-            serde_json::Value::Number(value_number) => value_number.to_string(),
-            serde_json::Value::String(value_string) => value_string,
-            serde_json::Value::Null => continue,
-            serde_json::Value::Array(_) | serde_json::Value::Object(_) => bail!(
+            JsonValue::Bool(value_bool) => value_bool.to_string(),
+            JsonValue::Number(value_number) => value_number.to_string(),
+            JsonValue::String(value_string) => value_string,
+            JsonValue::Null => continue,
+            JsonValue::Array(_) | JsonValue::Object(_) => bail!(
                 "Failed to parse Kafka client parameters. `client_params.{}` must be a boolean, \
                  number, or string.",
                 key
@@ -745,11 +763,11 @@ fn parse_message_payload(message: &BorrowedMessage) -> Option<String> {
 mod kafka_broker_tests {
     use std::path::PathBuf;
 
-    use quickwit_actors::{create_test_mailbox, ActorContext, Universe};
+    use quickwit_actors::{ActorContext, Universe};
     use quickwit_common::rand::append_random_suffix;
-    use quickwit_config::{SourceConfig, SourceParams};
+    use quickwit_config::{IndexConfig, SourceConfig, SourceParams};
     use quickwit_metastore::checkpoint::{IndexCheckpointDelta, SourceCheckpointDelta};
-    use quickwit_metastore::{metastore_for_test, IndexMetadata, Metastore, SplitMetadata};
+    use quickwit_metastore::{metastore_for_test, Metastore, SplitMetadata};
     use rdkafka::admin::{AdminClient, AdminOptions, NewTopic, TopicReplication};
     use rdkafka::client::DefaultClientContext;
     use rdkafka::message::ToBytes;
@@ -850,7 +868,8 @@ mod kafka_broker_tests {
         let source_id = append_random_suffix("test-kafka-source--source");
         let source_config = SourceConfig {
             source_id: source_id.clone(),
-            num_pipelines: 1,
+            desired_num_pipelines: 1,
+            max_num_pipelines_per_indexer: 1,
             enabled: true,
             source_params: SourceParams::Kafka(KafkaSourceParams {
                 topic: topic.to_string(),
@@ -860,6 +879,7 @@ mod kafka_broker_tests {
                 }),
                 enable_backfill_mode: true,
             }),
+            transform_config: None,
         };
         (source_id, source_config)
     }
@@ -883,8 +903,8 @@ mod kafka_broker_tests {
         partition_deltas: &[(u64, i64, i64)],
     ) {
         let index_uri = format!("ram:///indexes/{index_id}");
-        let index_metadata = IndexMetadata::for_test(index_id, &index_uri);
-        metastore.create_index(index_metadata).await.unwrap();
+        let index_config = IndexConfig::for_test(index_id, &index_uri);
+        metastore.create_index(index_config).await.unwrap();
 
         if partition_deltas.is_empty() {
             return;
@@ -892,7 +912,7 @@ mod kafka_broker_tests {
         let split_id = new_split_id();
         let split_metadata = SplitMetadata::for_test(split_id.clone());
         metastore
-            .stage_split(index_id, split_metadata)
+            .stage_splits(index_id, vec![split_metadata])
             .await
             .unwrap();
 
@@ -1074,8 +1094,8 @@ mod kafka_broker_tests {
             .unwrap();
         kafka_source.state.num_inactive_partitions = 1;
 
-        let universe = Universe::new();
-        let (source_mailbox, _source_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (source_mailbox, _source_inbox) = universe.create_test_mailbox();
         let (observable_state_tx, _observable_state_rx) = watch::channel(json!({}));
         let ctx: ActorContext<SourceActor> =
             ActorContext::for_test(&universe, source_mailbox, observable_state_tx);
@@ -1133,9 +1153,9 @@ mod kafka_broker_tests {
             .await
             .unwrap();
 
-        let universe = Universe::new();
-        let (source_mailbox, _source_inbox) = create_test_mailbox();
-        let (indexer_mailbox, indexer_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (source_mailbox, _source_inbox) = universe.create_test_mailbox();
+        let (indexer_mailbox, indexer_inbox) = universe.create_test_mailbox();
         let (observable_state_tx, _observable_state_rx) = watch::channel(json!({}));
         let ctx: ActorContext<SourceActor> =
             ActorContext::for_test(&universe, source_mailbox, observable_state_tx);
@@ -1203,7 +1223,7 @@ mod kafka_broker_tests {
 
     #[tokio::test]
     async fn test_kafka_source() -> anyhow::Result<()> {
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let admin_client = create_admin_client()?;
         let topic = append_random_suffix("test-kafka-source--topic");
         create_topic(&admin_client, &topic, 3).await?;
@@ -1228,7 +1248,7 @@ mod kafka_broker_tests {
 
             setup_index(metastore.clone(), &index_id, &source_id, &[]).await;
 
-            let (doc_processor_mailbox, doc_processor_inbox) = create_test_mailbox();
+            let (doc_processor_mailbox, doc_processor_inbox) = universe.create_test_mailbox();
             let source_actor = SourceActor {
                 source,
                 doc_processor_mailbox: doc_processor_mailbox.clone(),
@@ -1290,7 +1310,7 @@ mod kafka_broker_tests {
 
             setup_index(metastore.clone(), &index_id, &source_id, &[]).await;
 
-            let (doc_processor_mailbox, doc_processor_inbox) = create_test_mailbox();
+            let (doc_processor_mailbox, doc_processor_inbox) = universe.create_test_mailbox();
             let source_actor = SourceActor {
                 source,
                 doc_processor_mailbox: doc_processor_mailbox.clone(),
@@ -1362,7 +1382,7 @@ mod kafka_broker_tests {
             )
             .await;
 
-            let (doc_processor_mailbox, doc_processor_inbox) = create_test_mailbox();
+            let (doc_processor_mailbox, doc_processor_inbox) = universe.create_test_mailbox();
             let source_actor = SourceActor {
                 source,
                 doc_processor_mailbox: doc_processor_mailbox.clone(),
@@ -1448,5 +1468,17 @@ mod kafka_broker_tests {
         })
         .await
         .unwrap_err();
+    }
+
+    #[test]
+    fn test_client_config_default_max_poll_interval() {
+        // If the client config does not specify `max.poll.interval.ms`, then the default value
+        // provided by the native config will be used.
+        //
+        // This unit test will warn us if the current default value of 5 minutes changes.
+        let config = ClientConfig::new();
+        let native_config = config.create_native_config().unwrap();
+        let default_max_poll_interval_ms = native_config.get("max.poll.interval.ms").unwrap();
+        assert_eq!(default_max_poll_interval_ms, "300000");
     }
 }

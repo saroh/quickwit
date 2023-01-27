@@ -37,7 +37,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::info;
 
 use crate::search_stream::{leaf_search_stream, root_search_stream};
-use crate::{fetch_docs, leaf_search, root_search, ClusterClient, SearchClientPool, SearchError};
+use crate::{fetch_docs, leaf_search, root_search, ClusterClient, SearchError, SearchJobPlacer};
 
 #[derive(Clone)]
 /// The search service implementation.
@@ -45,7 +45,7 @@ pub struct SearchServiceImpl {
     metastore: Arc<dyn Metastore>,
     storage_uri_resolver: StorageUriResolver,
     cluster_client: ClusterClient,
-    client_pool: SearchClientPool,
+    search_job_placer: SearchJobPlacer,
     searcher_context: Arc<SearcherContext>,
 }
 
@@ -97,7 +97,7 @@ impl SearchServiceImpl {
         metastore: Arc<dyn Metastore>,
         storage_uri_resolver: StorageUriResolver,
         cluster_client: ClusterClient,
-        client_pool: SearchClientPool,
+        search_job_placer: SearchJobPlacer,
         searcher_config: SearcherConfig,
     ) -> Self {
         let searcher_context = Arc::new(SearcherContext::new(searcher_config));
@@ -105,7 +105,7 @@ impl SearchServiceImpl {
             metastore,
             storage_uri_resolver,
             cluster_client,
-            client_pool,
+            search_job_placer,
             searcher_context,
         }
     }
@@ -125,7 +125,7 @@ impl SearchService for SearchServiceImpl {
             &search_request,
             self.metastore.as_ref(),
             &self.cluster_client,
-            &self.client_pool,
+            &self.search_job_placer,
         )
         .await?;
 
@@ -142,7 +142,7 @@ impl SearchService for SearchServiceImpl {
         info!(index=?search_request.index_id, splits=?leaf_search_request.split_offsets, "leaf_search");
         let storage = self
             .storage_uri_resolver
-            .resolve(&Uri::new(leaf_search_request.index_uri))?;
+            .resolve(&Uri::from_well_formed(leaf_search_request.index_uri))?;
         let split_ids = leaf_search_request.split_offsets;
         let doc_mapper = deserialize_doc_mapper(&leaf_search_request.doc_mapper)?;
 
@@ -164,19 +164,15 @@ impl SearchService for SearchServiceImpl {
     ) -> crate::Result<FetchDocsResponse> {
         let storage = self
             .storage_uri_resolver
-            .resolve(&Uri::new(fetch_docs_request.index_uri))?;
+            .resolve(&Uri::from_well_formed(fetch_docs_request.index_uri))?;
         let search_request_opt = fetch_docs_request.search_request.as_ref();
-        let doc_mapper_opt = if let Some(doc_mapper_str) = &fetch_docs_request.doc_mapper {
-            Some(deserialize_doc_mapper(doc_mapper_str)?)
-        } else {
-            None
-        };
+        let doc_mapper = deserialize_doc_mapper(&fetch_docs_request.doc_mapper)?;
         let fetch_docs_response = fetch_docs(
             self.searcher_context.clone(),
             fetch_docs_request.partial_hits,
             storage,
             &fetch_docs_request.split_offsets,
-            doc_mapper_opt,
+            doc_mapper,
             search_request_opt,
         )
         .await?;
@@ -192,7 +188,7 @@ impl SearchService for SearchServiceImpl {
             stream_request,
             self.metastore.as_ref(),
             self.cluster_client.clone(),
-            &self.client_pool,
+            &self.search_job_placer,
         )
         .await?;
         Ok(Box::pin(data))
@@ -208,7 +204,7 @@ impl SearchService for SearchServiceImpl {
         info!(index=?stream_request.index_id, splits=?leaf_stream_request.split_offsets, "leaf_search");
         let storage = self
             .storage_uri_resolver
-            .resolve(&Uri::new(leaf_stream_request.index_uri))?;
+            .resolve(&Uri::from_well_formed(leaf_stream_request.index_uri))?;
         let doc_mapper = deserialize_doc_mapper(&leaf_stream_request.doc_mapper)?;
         let leaf_receiver = leaf_search_stream(
             self.searcher_context.clone(),

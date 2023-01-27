@@ -37,6 +37,14 @@ impl<T> LockedOption<T> {
         }
     }
 
+    pub fn is_some(&self) -> bool {
+        self.has_val.load(Ordering::Acquire)
+    }
+
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+
     pub fn take(&self) -> Option<T> {
         if !self.has_val.load(Ordering::Acquire) {
             return None;
@@ -60,6 +68,23 @@ pub enum SendError {
     Disconnected,
     #[error("The channel is full.")]
     Full,
+}
+
+#[derive(Debug, Error)]
+pub enum TrySendError<M> {
+    #[error("The channel is closed.")]
+    Disconnected,
+    #[error("The channel is full.")]
+    Full(M),
+}
+
+impl<M> From<flume::TrySendError<M>> for TrySendError<M> {
+    fn from(err: flume::TrySendError<M>) -> Self {
+        match err {
+            flume::TrySendError::Full(msg) => TrySendError::Full(msg),
+            flume::TrySendError::Disconnected(_) => TrySendError::Disconnected,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Error, Eq, PartialEq)]
@@ -133,6 +158,11 @@ impl<T> Sender<T> {
         self.low_priority_tx.is_disconnected()
     }
 
+    pub fn try_send_low_priority(&self, msg: T) -> Result<(), TrySendError<T>> {
+        self.low_priority_tx.try_send(msg)?;
+        Ok(())
+    }
+
     pub async fn send_low_priority(&self, msg: T) -> Result<(), SendError> {
         self.low_priority_tx.send_async(msg).await?;
         Ok(())
@@ -152,6 +182,12 @@ pub struct Receiver<T> {
 }
 
 impl<T> Receiver<T> {
+    pub fn is_empty(&self) -> bool {
+        self.low_priority_rx.is_empty()
+            && self.pending_low_priority_message.is_none()
+            && self.high_priority_rx.is_empty()
+    }
+
     pub fn try_recv_high_priority_message(&self) -> Result<T, RecvError> {
         match self.high_priority_rx.try_recv() {
             Ok(msg) => Ok(msg),
@@ -176,7 +212,6 @@ impl<T> Receiver<T> {
         }
     }
 
-    #[allow(dead_code)] // temporary
     pub fn try_recv(&self) -> Result<T, RecvError> {
         if let Ok(msg) = self.high_priority_rx.try_recv() {
             return Ok(msg);
@@ -219,6 +254,9 @@ impl<T> Receiver<T> {
             return Ok(pending_msg);
         }
         tokio::select! {
+            // We don't really care about fairness here.
+            // We will double check if there is a command or not anyway.
+            biased;
             high_priority_msg_res = self.high_priority_rx.recv_async() => {
                 match high_priority_msg_res {
                     Ok(high_priority_msg) => {

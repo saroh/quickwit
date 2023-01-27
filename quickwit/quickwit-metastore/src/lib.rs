@@ -19,6 +19,8 @@
 
 #![warn(missing_docs)]
 #![allow(clippy::bool_assert_comparison)]
+#![deny(clippy::disallowed_methods)]
+#![allow(rustdoc::invalid_html_tags)]
 
 //! `quickwit-metastore` is the abstraction used in quickwit to interface itself to different
 //! metastore:
@@ -27,32 +29,47 @@
 
 #[macro_use]
 mod tests;
-mod split_metadata;
-mod split_metadata_version;
-
 #[allow(missing_docs)]
 pub mod checkpoint;
 mod error;
 mod metastore;
 mod metastore_resolver;
+mod metrics;
+mod split_metadata;
+mod split_metadata_version;
 
 use std::ops::Range;
 
 pub use error::{MetastoreError, MetastoreResolverError, MetastoreResult};
 pub use metastore::file_backed_metastore::FileBackedMetastore;
 pub use metastore::grpc_metastore::{GrpcMetastoreAdapter, MetastoreGrpcClient};
+pub(crate) use metastore::index_metadata::serialize::{IndexMetadataV0_4, VersionedIndexMetadata};
+pub use metastore::metastore_with_control_plane_triggers::MetastoreWithControlPlaneTriggers;
 #[cfg(feature = "postgres")]
 pub use metastore::postgresql_metastore::PostgresqlMetastore;
+pub use metastore::retrying_metastore::RetryingMetastore;
 #[cfg(any(test, feature = "testsuite"))]
 pub use metastore::MockMetastore;
-pub use metastore::{file_backed_metastore, IndexMetadata, Metastore};
+pub use metastore::{file_backed_metastore, IndexMetadata, ListSplitsQuery, Metastore};
 pub use metastore_resolver::{
     quickwit_metastore_uri_resolver, MetastoreFactory, MetastoreUriResolver,
 };
 use quickwit_common::is_disjoint;
 use quickwit_doc_mapper::tag_pruning::TagFilterAst;
 pub use split_metadata::{Split, SplitMetadata, SplitState};
-pub(crate) use split_metadata_version::VersionedSplitMetadata;
+pub(crate) use split_metadata_version::{SplitMetadataV0_4, VersionedSplitMetadata};
+
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(
+    Split,
+    SplitState,
+    VersionedIndexMetadata,
+    IndexMetadataV0_4,
+    VersionedSplitMetadata,
+    SplitMetadataV0_4,
+)))]
+/// Schema used for the OpenAPI generation which are apart of this crate.
+pub struct MetastoreApiSchemas;
 
 /// Returns `true` if the split time range is included in `time_range_opt`.
 /// If `time_range_opt` is None, returns always true.

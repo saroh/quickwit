@@ -17,6 +17,8 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+#![deny(clippy::disallowed_methods)]
+
 mod errors;
 mod ingest_api_service;
 mod metrics;
@@ -29,12 +31,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context};
 pub use errors::IngestApiError;
 use errors::Result;
-pub use ingest_api_service::IngestApiService;
+pub use ingest_api_service::{GetPartitionId, IngestApiService};
 use metrics::INGEST_METRICS;
 use once_cell::sync::OnceCell;
 pub use position::Position;
 pub use queue::Queues;
 use quickwit_actors::{Mailbox, Universe};
+use quickwit_config::IngestApiConfig;
 use quickwit_proto::ingest_api::DocBatch;
 use tokio::sync::Mutex;
 
@@ -49,6 +52,7 @@ pub static INGEST_API_SERVICE_MAILBOXES: OnceCell<Mutex<IngestApiServiceMailboxe
 pub async fn init_ingest_api(
     universe: &Universe,
     queues_dir_path: &Path,
+    config: &IngestApiConfig,
 ) -> anyhow::Result<Mailbox<IngestApiService>> {
     let mut guard = INGEST_API_SERVICE_MAILBOXES
         .get_or_init(|| Mutex::new(HashMap::new()))
@@ -57,13 +61,18 @@ pub async fn init_ingest_api(
     if let Some(mailbox) = guard.get(queues_dir_path) {
         return Ok(mailbox.clone());
     }
-    let ingest_api_actor =
-        IngestApiService::with_queues_dir(queues_dir_path).with_context(|| {
-            format!(
-                "Failed to open RocksDB instance located at `{}`.",
-                queues_dir_path.display()
-            )
-        })?;
+    let ingest_api_actor = IngestApiService::with_queues_dir(
+        queues_dir_path,
+        config.max_queue_memory_usage,
+        config.max_queue_disk_usage,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "Failed to open the ingest API record log located at `{}`.",
+            queues_dir_path.display()
+        )
+    })?;
     let (ingest_api_service, _ingest_api_handle) = universe.spawn_builder().spawn(ingest_api_actor);
     guard.insert(queues_dir_path.to_path_buf(), ingest_api_service.clone());
     Ok(ingest_api_service)
@@ -90,9 +99,10 @@ pub async fn get_ingest_api_service(
 pub async fn start_ingest_api_service(
     universe: &Universe,
     data_dir_path: &Path,
+    config: &IngestApiConfig,
 ) -> anyhow::Result<Mailbox<IngestApiService>> {
     let queues_dir_path = data_dir_path.join(QUEUES_DIR_NAME);
-    init_ingest_api(universe, &queues_dir_path).await
+    init_ingest_api(universe, &queues_dir_path, config).await
 }
 
 /// Adds a document raw bytes to a [`DocBatch`]
@@ -122,20 +132,21 @@ pub fn iter_doc_payloads(doc_batch: &DocBatch) -> impl Iterator<Item = &[u8]> {
 #[cfg(test)]
 mod tests {
 
-    use quickwit_proto::ingest_api::CreateQueueRequest;
+    use quickwit_actors::AskError;
+    use quickwit_proto::ingest_api::{CreateQueueRequest, IngestRequest, SuggestTruncateRequest};
 
     use super::*;
 
     #[tokio::test]
     async fn test_get_ingest_api_service() {
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let tempdir = tempfile::tempdir().unwrap();
 
         let queues_0_dir_path = tempdir.path().join("queues-0");
         get_ingest_api_service(&queues_0_dir_path)
             .await
             .unwrap_err();
-        init_ingest_api(&universe, &queues_0_dir_path)
+        init_ingest_api(&universe, &queues_0_dir_path, &IngestApiConfig::default())
             .await
             .unwrap();
         let ingest_api_service_0 = get_ingest_api_service(&queues_0_dir_path).await.unwrap();
@@ -147,7 +158,7 @@ mod tests {
             .unwrap();
 
         let queues_1_dir_path = tempdir.path().join("queues-1");
-        init_ingest_api(&universe, &queues_1_dir_path)
+        init_ingest_api(&universe, &queues_1_dir_path, &IngestApiConfig::default())
             .await
             .unwrap();
         let ingest_api_service_1 = get_ingest_api_service(&queues_1_dir_path).await.unwrap();
@@ -155,6 +166,75 @@ mod tests {
             .ask_for_res(CreateQueueRequest {
                 queue_id: "test-queue".to_string(),
             })
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_queue_limit() {
+        let universe = Universe::with_accelerated_time();
+        let tempdir = tempfile::tempdir().unwrap();
+
+        let queues_dir_path = tempdir.path().join("queues-0");
+        get_ingest_api_service(&queues_dir_path).await.unwrap_err();
+        init_ingest_api(
+            &universe,
+            &queues_dir_path,
+            &IngestApiConfig {
+                max_queue_memory_usage: 1024,
+                max_queue_disk_usage: 1024 * 1024 * 256,
+            },
+        )
+        .await
+        .unwrap();
+        let ingest_api_service = get_ingest_api_service(&queues_dir_path).await.unwrap();
+
+        ingest_api_service
+            .ask_for_res(CreateQueueRequest {
+                queue_id: "test-queue".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let ingest_request = IngestRequest {
+            doc_batches: vec![DocBatch {
+                index_id: "test-queue".to_string(),
+                concat_docs: vec![1; 600],
+                doc_lens: vec![30; 20],
+            }],
+        };
+
+        ingest_api_service
+            .ask_for_res(ingest_request.clone())
+            .await
+            .unwrap();
+
+        ingest_api_service
+            .ask_for_res(ingest_request.clone())
+            .await
+            .unwrap();
+
+        // we have to much in memory
+        assert!(matches!(
+            ingest_api_service
+                .ask_for_res(ingest_request.clone())
+                .await
+                .unwrap_err(),
+            AskError::ErrorReply(IngestApiError::RateLimited)
+        ));
+
+        // delete the first batch
+        ingest_api_service
+            .ask_for_res(SuggestTruncateRequest {
+                index_id: "test-queue".to_string(),
+                up_to_position_included: 29,
+            })
+            .await
+            .unwrap();
+
+        // now we should be okay
+        ingest_api_service
+            .ask_for_res(ingest_request)
             .await
             .unwrap();
     }

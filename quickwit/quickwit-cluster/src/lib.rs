@@ -17,8 +17,11 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+#![deny(clippy::disallowed_methods)]
+
 mod cluster;
 mod error;
+mod member;
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -29,10 +32,11 @@ use quickwit_config::service::QuickwitService;
 use quickwit_config::QuickwitConfig;
 
 pub use crate::cluster::{
-    create_cluster_for_test, grpc_addr_from_listen_addr_for_test, Cluster, ClusterMember,
-    ClusterSnapshot,
+    create_cluster_for_test, create_fake_cluster_for_cli, grpc_addr_from_listen_addr_for_test,
+    Cluster, ClusterSnapshot, NodeIdSchema,
 };
 pub use crate::error::{ClusterError, ClusterResult};
+pub use crate::member::{ClusterMember, RunningIndexingPlan};
 
 fn unix_timestamp() -> u64 {
     let duration_since_epoch = std::time::SystemTime::now()
@@ -43,18 +47,19 @@ fn unix_timestamp() -> u64 {
 
 pub async fn start_cluster_service(
     quickwit_config: &QuickwitConfig,
-    services: &HashSet<QuickwitService>,
+    enabled_services: &HashSet<QuickwitService>,
 ) -> anyhow::Result<Arc<Cluster>> {
-    let member = ClusterMember::new(
+    let self_node = ClusterMember::new(
         quickwit_config.node_id.clone(),
         unix_timestamp(),
+        enabled_services.clone(),
         quickwit_config.gossip_advertise_addr,
-        services.clone(),
         quickwit_config.grpc_advertise_addr,
+        None,
     );
 
     let cluster = Cluster::join(
-        member,
+        self_node,
         quickwit_config.gossip_listen_addr,
         quickwit_config.cluster_id.clone(),
         quickwit_config.peer_seed_addrs().await?,

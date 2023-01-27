@@ -21,8 +21,9 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use quickwit_actors::{Actor, ActorContext, ActorExitStatus, Handler, Mailbox, QueueCapacity};
+use quickwit_common::io::IoControls;
 use quickwit_metastore::SplitMetadata;
-use tantivy::Directory;
+use tantivy::{Directory, TrackedObject};
 use tracing::{debug, info, instrument};
 
 use super::MergeExecutor;
@@ -35,6 +36,7 @@ pub struct MergeSplitDownloader {
     pub scratch_directory: ScratchDirectory,
     pub split_store: IndexingSplitStore,
     pub executor_mailbox: Mailbox<MergeExecutor>,
+    pub io_controls: IoControls,
 }
 
 impl Actor for MergeSplitDownloader {
@@ -51,7 +53,7 @@ impl Actor for MergeSplitDownloader {
 }
 
 #[async_trait]
-impl Handler<MergeOperation> for MergeSplitDownloader {
+impl Handler<TrackedObject<MergeOperation>> for MergeSplitDownloader {
     type Reply = ();
 
     #[instrument(
@@ -61,7 +63,7 @@ impl Handler<MergeOperation> for MergeSplitDownloader {
     )]
     async fn handle(
         &mut self,
-        merge_operation: MergeOperation,
+        merge_operation: TrackedObject<MergeOperation>,
         ctx: &ActorContext<Self>,
     ) -> Result<(), quickwit_actors::ActorExitStatus> {
         let merge_scratch_directory = self
@@ -107,10 +109,15 @@ impl MergeSplitDownloader {
                 );
                 return Err(ActorExitStatus::Killed);
             }
+            let io_controls = self
+                .io_controls
+                .clone()
+                .set_progress(ctx.progress().clone())
+                .set_kill_switch(ctx.kill_switch().clone());
             let _protect_guard = ctx.protect_zone();
             let tantivy_dir = self
                 .split_store
-                .fetch_and_open_split(split.split_id(), download_directory)
+                .fetch_and_open_split(split.split_id(), download_directory, &io_controls)
                 .await
                 .map_err(|error| {
                     let split_id = split.split_id();
@@ -127,16 +134,17 @@ mod tests {
     use std::iter;
     use std::sync::Arc;
 
-    use quickwit_actors::{create_test_mailbox, Universe};
+    use quickwit_actors::Universe;
     use quickwit_common::split_file;
     use quickwit_storage::{PutPayload, RamStorageBuilder, SplitPayloadBuilder};
+    use tantivy::Inventory;
 
     use super::*;
     use crate::new_split_id;
 
     #[tokio::test]
     async fn test_merge_split_downloader() -> anyhow::Result<()> {
-        let scratch_directory = ScratchDirectory::for_test()?;
+        let scratch_directory = ScratchDirectory::for_test();
         let splits_to_merge: Vec<SplitMetadata> = iter::repeat_with(|| {
             let split_id = new_split_id();
             SplitMetadata {
@@ -159,16 +167,18 @@ mod tests {
             IndexingSplitStore::create_without_local_store(Arc::new(ram_storage))
         };
 
-        let universe = Universe::new();
-        let (merge_executor_mailbox, merge_executor_inbox) = create_test_mailbox();
+        let universe = Universe::with_accelerated_time();
+        let (merge_executor_mailbox, merge_executor_inbox) = universe.create_test_mailbox();
         let merge_split_downloader = MergeSplitDownloader {
             scratch_directory,
             split_store,
             executor_mailbox: merge_executor_mailbox,
+            io_controls: IoControls::default(),
         };
         let (merge_split_downloader_mailbox, merge_split_downloader_handler) =
             universe.spawn_builder().spawn(merge_split_downloader);
-        let merge_operation = MergeOperation::new_merge_operation(splits_to_merge);
+        let inventory = Inventory::new();
+        let merge_operation = inventory.track(MergeOperation::new_merge_operation(splits_to_merge));
         merge_split_downloader_mailbox
             .send_message(merge_operation)
             .await?;
@@ -189,8 +199,8 @@ mod tests {
             let split_filepath = merge_scratch
                 .downloaded_splits_directory
                 .path()
-                .join(&split_filename);
-            assert!(split_filepath.exists());
+                .join(split_filename);
+            assert!(split_filepath.try_exists().unwrap());
         }
         Ok(())
     }

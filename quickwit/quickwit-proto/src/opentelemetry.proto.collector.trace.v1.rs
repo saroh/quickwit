@@ -1,4 +1,5 @@
 #[derive(Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExportTraceServiceRequest {
     /// An array of ResourceSpans.
@@ -6,10 +7,13 @@ pub struct ExportTraceServiceRequest {
     /// element. Intermediary nodes (such as OpenTelemetry Collector) that receive
     /// data from multiple origins typically batch the data before forwarding further and
     /// in that case this array will contain multiple elements.
-    #[prost(message, repeated, tag="1")]
-    pub resource_spans: ::prost::alloc::vec::Vec<super::super::super::trace::v1::ResourceSpans>,
+    #[prost(message, repeated, tag = "1")]
+    pub resource_spans: ::prost::alloc::vec::Vec<
+        super::super::super::trace::v1::ResourceSpans,
+    >,
 }
 #[derive(Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExportTraceServiceResponse {
     /// The details of a partially successful export request.
@@ -27,17 +31,18 @@ pub struct ExportTraceServiceResponse {
     /// A `partial_success` message with an empty value (rejected_<signal> = 0 and
     /// `error_message` = "") is equivalent to it not being set/present. Senders
     /// SHOULD interpret it the same way as in the full success case.
-    #[prost(message, optional, tag="1")]
+    #[prost(message, optional, tag = "1")]
     pub partial_success: ::core::option::Option<ExportTracePartialSuccess>,
 }
 #[derive(Serialize, Deserialize)]
+#[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct ExportTracePartialSuccess {
     /// The number of rejected spans.
     ///
     /// A `rejected_<signal>` field holding a `0` value indicates that the
     /// request was fully accepted.
-    #[prost(int64, tag="1")]
+    #[prost(int64, tag = "1")]
     pub rejected_spans: i64,
     /// A developer-facing human-readable message in English. It should be used
     /// either to explain why the server rejected parts of the data during a partial
@@ -46,7 +51,7 @@ pub struct ExportTracePartialSuccess {
     ///
     /// error_message is an optional field. An error_message with an empty value
     /// is equivalent to it not being set.
-    #[prost(string, tag="2")]
+    #[prost(string, tag = "2")]
     pub error_message: ::prost::alloc::string::String,
 }
 /// Generated client implementations.
@@ -148,7 +153,7 @@ pub mod trace_service_client {
 pub mod trace_service_server {
     #![allow(unused_variables, dead_code, missing_docs, clippy::let_unit_value)]
     use tonic::codegen::*;
-    ///Generated trait containing gRPC methods that should be implemented for use with TraceServiceServer.
+    /// Generated trait containing gRPC methods that should be implemented for use with TraceServiceServer.
     #[async_trait]
     pub trait TraceService: Send + Sync + 'static {
         /// For performance reasons, it is recommended to keep this RPC

@@ -24,18 +24,19 @@ mod stable_log_merge_policy;
 use std::fmt;
 use std::sync::Arc;
 
+pub(crate) use const_write_amplification::ConstWriteAmplificationMergePolicy;
 use itertools::Itertools;
 pub use nop_merge_policy::NopMergePolicy;
 use quickwit_config::merge_policy_config::MergePolicyConfig;
 use quickwit_config::IndexingSettings;
 use quickwit_metastore::SplitMetadata;
+use serde::Serialize;
 pub(crate) use stable_log_merge_policy::StableLogMergePolicy;
 use tracing::{info_span, Span};
 
-use crate::merge_policy::const_write_amplification::ConstWriteAmplificationMergePolicy;
 use crate::new_split_id;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum MergeOperationType {
     Merge,
     DeleteAndMerge,
@@ -47,8 +48,9 @@ impl fmt::Display for MergeOperationType {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize)]
 pub struct MergeOperation {
+    #[serde(skip_serializing)]
     pub merge_parent_span: Span,
     pub merge_split_id: String,
     pub splits: Vec<SplitMetadata>,
@@ -161,8 +163,10 @@ pub mod tests {
     use std::ops::RangeInclusive;
 
     use proptest::prelude::*;
-    use quickwit_actors::{create_test_mailbox, Universe};
+    use quickwit_actors::Universe;
     use rand::seq::SliceRandom;
+    use tantivy::TrackedObject;
+    use time::OffsetDateTime;
 
     use super::*;
     use crate::actors::{merge_split_attrs, MergePlanner, MergeSplitDownloader};
@@ -222,6 +226,7 @@ pub mod tests {
                 split_id: format!("split_{:02}", split_ord),
                 num_docs,
                 time_range: Some(time_range),
+                create_timestamp: OffsetDateTime::now_utc().unix_timestamp(),
                 ..Default::default()
             })
             .collect()
@@ -337,7 +342,9 @@ pub mod tests {
         incoming_splits: Vec<SplitMetadata>,
         check_final_configuration: CheckFn,
     ) -> anyhow::Result<Vec<SplitMetadata>> {
-        let (merge_op_mailbox, merge_op_inbox) = create_test_mailbox::<MergeSplitDownloader>();
+        let universe = Universe::new();
+        let (merge_op_mailbox, merge_op_inbox) =
+            universe.create_test_mailbox::<MergeSplitDownloader>();
         let pipeline_id = IndexingPipelineId {
             index_id: "test-index".to_string(),
             source_id: "test-source".to_string(),
@@ -346,7 +353,6 @@ pub mod tests {
         };
         let merge_planner =
             MergePlanner::new(pipeline_id, Vec::new(), merge_policy, merge_op_mailbox);
-        let universe = Universe::new();
         let mut split_index: HashMap<String, SplitMetadata> = HashMap::default();
         let (merge_planner_mailbox, merge_planner_handler) =
             universe.spawn_builder().spawn(merge_planner);
@@ -361,12 +367,8 @@ pub mod tests {
             loop {
                 let obs = merge_planner_handler.process_pending_and_observe().await;
                 assert_eq!(obs.obs_type, quickwit_actors::ObservationType::Alive);
-                let merge_ops: Vec<MergeOperation> = merge_op_inbox
-                    .drain_for_test()
-                    .into_iter()
-                    .flat_map(|op| op.downcast::<MergeOperation>())
-                    .map(|op| *op)
-                    .collect();
+                let merge_ops =
+                    merge_op_inbox.drain_for_test_typed::<TrackedObject<MergeOperation>>();
                 if merge_ops.is_empty() {
                     break;
                 }
@@ -395,9 +397,12 @@ pub mod tests {
             num_docs: num_docs as usize,
             uncompressed_docs_size_in_bytes: 256u64 * num_docs,
             time_range: Some(time_range),
-            create_timestamp: 0,
+            create_timestamp: OffsetDateTime::now_utc().unix_timestamp(),
             tags: BTreeSet::from_iter(vec!["tenant_id:1".to_string(), "tenant_id:2".to_string()]),
             footer_offsets: 0..100,
+            index_id: "test-index".to_string(),
+            source_id: "test-source".to_string(),
+            node_id: "test-node".to_string(),
             ..Default::default()
         }
     }

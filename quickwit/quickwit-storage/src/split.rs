@@ -124,7 +124,7 @@ impl SplitPayloadBuilder {
     /// the hotcache and the metadata in one continous read.
     pub fn add_file(&mut self, path: &Path) -> io::Result<()> {
         let file = std::fs::metadata(path)?;
-        let file_range = self.current_offset as u64..self.current_offset as u64 + file.len() as u64;
+        let file_range = self.current_offset as u64..self.current_offset as u64 + file.len();
         self.current_offset += file.len() as usize;
         self.metadata.files.insert(path.to_owned(), file_range);
         Ok(())
@@ -157,9 +157,9 @@ impl SplitPayloadBuilder {
 
         footer_bytes.extend(metadata_json.as_bytes());
         let metadata_json_len = metadata_json.len() as u64;
-        footer_bytes.extend(&metadata_json_len.to_le_bytes());
+        footer_bytes.extend(metadata_json_len.to_le_bytes());
         footer_bytes.extend(hotcache);
-        footer_bytes.extend(&hotcache.len().to_le_bytes());
+        footer_bytes.extend(hotcache.len().to_le_bytes());
 
         let mut payloads: Vec<Box<dyn PutPayload>> = Vec::new();
 

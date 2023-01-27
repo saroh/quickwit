@@ -1,6 +1,6 @@
 [package]
 name = "quickwit-aws"
-version = "0.3.1"
+version = "0.4.0"
 authors = ["Quickwit, Inc. <hello@quickwit.io>"]
 edition = "2021"
 license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
@@ -23,6 +23,9 @@ rusoto_s3 = { workspace = true }
 rusoto_sts = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+quickwit-actors = { workspace = true }
 
 [features]
 kinesis = ["rusoto_kinesis"]

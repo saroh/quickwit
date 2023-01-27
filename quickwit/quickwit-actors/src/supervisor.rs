@@ -112,7 +112,12 @@ impl<A: Actor> Supervisor<A> {
         &mut self,
         ctx: &ActorContext<Supervisor<A>>,
     ) -> Result<(), ActorExitStatus> {
-        match self.handle_opt.as_ref().unwrap().health() {
+        match self
+            .handle_opt
+            .as_ref()
+            .expect("The actor handle should always be set.")
+            .harvest_health()
+        {
             Health::Healthy => {
                 return Ok(());
             }
@@ -231,7 +236,7 @@ mod tests {
         async fn handle(
             &mut self,
             msg: FailingActorMessage,
-            _ctx: &ActorContext<Self>,
+            ctx: &ActorContext<Self>,
         ) -> Result<Self::Reply, ActorExitStatus> {
             match msg {
                 FailingActorMessage::Panic => {
@@ -246,7 +251,7 @@ mod tests {
                     self.counter += 1;
                 }
                 FailingActorMessage::Freeze(wait_duration) => {
-                    tokio::time::sleep(wait_duration).await;
+                    ctx.sleep(wait_duration).await;
                 }
             }
             Ok(self.counter)
@@ -256,7 +261,7 @@ mod tests {
     #[tokio::test]
     async fn test_supervisor_restart_on_panic() {
         quickwit_common::setup_logging_for_tests();
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let actor = FailingActor::default();
         let (mailbox, supervisor_handle) = universe.spawn_builder().supervise(actor);
         assert_eq!(
@@ -284,7 +289,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_supervisor_restart_on_error() {
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let actor = FailingActor::default();
         let (mailbox, supervisor_handle) = universe.spawn_builder().supervise(actor);
         assert_eq!(
@@ -312,14 +317,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_supervisor_kills_and_restart_frozen_actor() {
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let actor = FailingActor::default();
         let (mailbox, supervisor_handle) = universe.spawn_builder().supervise(actor);
         assert_eq!(
             mailbox.ask(FailingActorMessage::Increment).await.unwrap(),
             1
         );
-        universe.simulate_time_shift(Duration::from_secs(10)).await;
         assert_eq!(
             mailbox.ask(FailingActorMessage::Increment).await.unwrap(),
             2
@@ -332,13 +336,12 @@ mod tests {
                 num_kills: 0
             }
         );
-        assert_eq!(
-            mailbox
-                .ask(FailingActorMessage::Freeze(Duration::from_secs(10)))
-                .await
-                .unwrap(),
-            2
-        );
+        mailbox
+            .send_message(FailingActorMessage::Freeze(
+                crate::HEARTBEAT.mul_f32(3.0f32),
+            ))
+            .await
+            .unwrap();
         assert_eq!(
             mailbox.ask(FailingActorMessage::Increment).await.unwrap(),
             1
@@ -355,7 +358,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_supervisor_forwards_quit_commands() {
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let actor = FailingActor::default();
         let (mailbox, supervisor_handle) = universe.spawn_builder().supervise(actor);
         assert_eq!(
@@ -376,7 +379,7 @@ mod tests {
     #[tokio::test]
     async fn test_supervisor_forwards_kill_command() {
         quickwit_common::setup_logging_for_tests();
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let actor = FailingActor::default();
         let (mailbox, supervisor_handle) = universe.spawn_builder().supervise(actor);
         assert_eq!(
@@ -398,7 +401,7 @@ mod tests {
     #[tokio::test]
     async fn test_supervisor_exits_successfully_when_supervised_actor_mailbox_is_dropped() {
         quickwit_common::setup_logging_for_tests();
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let actor = FailingActor::default();
         let (_, supervisor_handle) = universe.spawn_builder().supervise(actor);
         let (exit_status, _state) = supervisor_handle.join().await;

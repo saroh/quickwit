@@ -22,13 +22,14 @@ use std::fmt;
 use std::ops::{Range, RangeInclusive};
 use std::str::FromStr;
 
+use quickwit_config::TestableForRegression;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
-use crate::VersionedSplitMetadata;
+use crate::split_metadata_version::VersionedSplitMetadata;
 
 /// Carries split metadata.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Split {
     /// The state of the split.
     pub split_state: SplitState,
@@ -39,8 +40,9 @@ pub struct Split {
     /// Timestamp for tracking when the split was published.
     pub publish_timestamp: Option<i64>,
 
-    /// Immutable part of the split.
     #[serde(flatten)]
+    #[schema(value_type = VersionedSplitMetadata)]
+    /// Immutable part of the split.
     pub split_metadata: SplitMetadata,
 }
 
@@ -54,8 +56,9 @@ impl Split {
 /// Carries immutable split metadata.
 /// This struct can deserialize older format automatically
 /// but can only serialize to the last version.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(into = "VersionedSplitMetadata")]
+#[serde(try_from = "VersionedSplitMetadata")]
 pub struct SplitMetadata {
     /// Split ID. Joined with the index URI (<index URI>/<split ID>), this ID
     /// should be enough to uniquely identify a split.
@@ -79,9 +82,6 @@ pub struct SplitMetadata {
 
     /// Node ID.
     pub node_id: String,
-
-    /// Pipeline ordinal.
-    pub pipeline_ord: usize,
 
     /// Number of records (or documents) in the split.
     /// TODO make u64
@@ -135,7 +135,6 @@ impl SplitMetadata {
         partition_id: u64,
         source_id: String,
         node_id: String,
-        pipeline_ord: usize,
     ) -> Self {
         Self {
             split_id,
@@ -143,7 +142,6 @@ impl SplitMetadata {
             partition_id,
             source_id,
             node_id,
-            pipeline_ord,
             create_timestamp: utc_now_timestamp(),
             ..Default::default()
         }
@@ -164,8 +162,32 @@ impl SplitMetadata {
     }
 }
 
+impl TestableForRegression for SplitMetadata {
+    fn sample_for_regression() -> Self {
+        SplitMetadata {
+            split_id: "split".to_string(),
+            index_id: "my-index".to_string(),
+            source_id: "source".to_string(),
+            node_id: "node".to_string(),
+            delete_opstamp: 10,
+            partition_id: 7u64,
+            num_docs: 12303,
+            uncompressed_docs_size_in_bytes: 234234,
+            time_range: Some(121000..=130198),
+            create_timestamp: 3,
+            tags: ["234".to_string(), "aaa".to_string()].into_iter().collect(),
+            footer_offsets: 1000..2000,
+            num_merge_ops: 3,
+        }
+    }
+
+    fn test_equality(&self, other: &Self) {
+        assert_eq!(self, other);
+    }
+}
+
 /// A split state.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Eq, PartialEq, utoipa::ToSchema)]
 pub enum SplitState {
     /// The split is almost ready. Some of its files may have been uploaded in the storage.
     Staged,

@@ -17,10 +17,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+#![deny(clippy::disallowed_methods)]
+
 use std::sync::Arc;
 
-use itertools::Itertools;
 use quickwit_actors::{Mailbox, Universe};
+use quickwit_cluster::Cluster;
 use quickwit_config::QuickwitConfig;
 use quickwit_ingest_api::{get_ingest_api_service, QUEUES_DIR_NAME};
 use quickwit_metastore::Metastore;
@@ -32,11 +34,13 @@ pub use crate::actors::{
     IngestApiGarbageCollector, PublisherType, Sequencer, SplitsUpdateMailbox,
 };
 pub use crate::controlled_directory::ControlledDirectory;
-use crate::models::{IndexingStatistics, SpawnPipelines};
+use crate::models::IndexingStatistics;
 pub use crate::split_store::{get_tantivy_directory_from_split_bundle, IndexingSplitStore};
 
 pub mod actors;
 mod controlled_directory;
+pub mod grpc_adapter;
+pub mod indexing_client;
 pub mod merge_policy;
 mod metrics;
 pub mod models;
@@ -51,6 +55,11 @@ pub use test_utils::{mock_split, mock_split_meta, TestSandbox};
 use self::merge_policy::MergePolicy;
 pub use self::source::check_source_connectivity;
 
+#[derive(utoipa::OpenApi)]
+#[openapi(components(schemas(IndexingStatistics)))]
+/// Schema used for the OpenAPI generation which are apart of this crate.
+pub struct IndexingApiSchemas;
+
 pub fn new_split_id() -> String {
     ulid::Ulid::new().to_string()
 }
@@ -58,6 +67,7 @@ pub fn new_split_id() -> String {
 pub async fn start_indexing_service(
     universe: &Universe,
     config: &QuickwitConfig,
+    cluster: Arc<Cluster>,
     metastore: Arc<dyn Metastore>,
     storage_resolver: StorageUriResolver,
 ) -> anyhow::Result<Mailbox<IndexingService>> {
@@ -67,23 +77,13 @@ pub async fn start_indexing_service(
         config.node_id.clone(),
         config.data_dir_path.to_path_buf(),
         config.indexer_config.clone(),
+        cluster,
         metastore.clone(),
         storage_resolver,
     )
     .await?;
     let (indexing_service, _) = universe.spawn_builder().spawn(indexing_service);
 
-    // List indexes and spawn indexing pipeline(s) for each of them.
-    let index_metadatas = metastore.list_indexes_metadatas().await?;
-    info!(index_ids=%index_metadatas.iter().map(|im| &im.index_id).join(", "), "Spawning indexing pipeline(s).");
-
-    for index_metadata in index_metadatas {
-        indexing_service
-            .ask_for_res(SpawnPipelines {
-                index_id: index_metadata.index_id,
-            })
-            .await?;
-    }
     // Spawn Ingest Api garbage collector.
     let queues_dir_path = config.data_dir_path.join(QUEUES_DIR_NAME);
     let ingest_api_service = get_ingest_api_service(&queues_dir_path).await?;

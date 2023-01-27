@@ -35,7 +35,7 @@ use super::IndexingService;
 use crate::models::ShutdownPipelines;
 
 const RUN_INTERVAL: Duration = if cfg!(test) {
-    Duration::from_secs(60) // 1min
+    Duration::from_secs(30)
 } else {
     Duration::from_secs(60 * 60) // 1h
 };
@@ -116,7 +116,7 @@ impl IngestApiGarbageCollector {
             .await
             .context("Failed to list queues")?
             .into_iter()
-            .map(|index_metadata| index_metadata.index_id)
+            .map(|index_metadata| index_metadata.index_id().to_string())
             .collect();
         debug!(index_ids=?index_ids, metastore_uri=%self.metastore.uri(), "List indexes.");
 
@@ -177,11 +177,13 @@ impl Handler<Loop> for IngestApiGarbageCollector {
 mod tests {
     use std::time::Duration;
 
+    use chitchat::transport::ChannelTransport;
     use quickwit_actors::Universe;
+    use quickwit_cluster::create_cluster_for_test;
     use quickwit_common::uri::Uri;
-    use quickwit_config::IndexerConfig;
+    use quickwit_config::{IndexConfig, IndexerConfig, IngestApiConfig};
     use quickwit_ingest_api::{init_ingest_api, QUEUES_DIR_NAME};
-    use quickwit_metastore::{quickwit_metastore_uri_resolver, IndexMetadata};
+    use quickwit_metastore::quickwit_metastore_uri_resolver;
     use quickwit_proto::ingest_api::CreateQueueIfNotExistsRequest;
     use quickwit_storage::StorageUriResolver;
 
@@ -189,22 +191,28 @@ mod tests {
 
     #[tokio::test]
     async fn test_ingest_api_garbage_collector() -> anyhow::Result<()> {
-        let index_id = "test-index".to_string();
+        let index_id = "test-ingest-api-gc-index".to_string();
         let index_uri = format!("ram:///indexes/{index_id}");
-        let index_metadata = IndexMetadata::for_test(&index_id, &index_uri);
-
-        let metastore_uri = Uri::new("ram:///metastore".to_string());
+        let index_config = IndexConfig::for_test(&index_id, &index_uri);
+        let transport = ChannelTransport::default();
+        let cluster = Arc::new(
+            create_cluster_for_test(Vec::new(), &["indexer"], &transport, true)
+                .await
+                .unwrap(),
+        );
+        let metastore_uri = Uri::from_well_formed("ram:///metastore");
         let metastore = quickwit_metastore_uri_resolver()
             .resolve(&metastore_uri)
             .await
             .unwrap();
-        metastore.create_index(index_metadata).await.unwrap();
+        metastore.create_index(index_config).await.unwrap();
 
         // Setup ingest api objects
-        let universe = Universe::new();
+        let universe = Universe::with_accelerated_time();
         let temp_dir = tempfile::tempdir().unwrap();
         let queues_dir_path = temp_dir.path().join(QUEUES_DIR_NAME);
-        let ingest_api_service = init_ingest_api(&universe, &queues_dir_path).await?;
+        let ingest_api_service =
+            init_ingest_api(&universe, &queues_dir_path, &IngestApiConfig::default()).await?;
         let create_queue_req = CreateQueueIfNotExistsRequest {
             queue_id: index_id.clone(),
         };
@@ -218,9 +226,10 @@ mod tests {
         let indexer_config = IndexerConfig::for_test().unwrap();
         let storage_resolver = StorageUriResolver::for_test();
         let indexing_server = IndexingService::new(
-            "test-node".to_string(),
+            "test-ingest-api-gc-node".to_string(),
             data_dir_path,
             indexer_config,
+            cluster.clone(),
             metastore.clone(),
             storage_resolver.clone(),
         )
@@ -239,16 +248,16 @@ mod tests {
         assert_eq!(state_after_initialization.num_passes, 1);
         assert_eq!(state_after_initialization.num_deleted_queues, 0);
 
-        // 30 seconds later
-        universe.simulate_time_shift(Duration::from_secs(30)).await;
+        // 15 seconds later
+        universe.sleep(Duration::from_secs(15)).await;
         let state_after_initialization = handler.process_pending_and_observe().await.state;
         assert_eq!(state_after_initialization.num_passes, 1);
         assert_eq!(state_after_initialization.num_deleted_queues, 0);
 
         metastore.delete_index(&index_id).await.unwrap();
 
-        // 1m later
-        universe.simulate_time_shift(RUN_INTERVAL).await;
+        // 45 seconds later
+        universe.sleep(RUN_INTERVAL).await;
         let state_after_initialization = handler.process_pending_and_observe().await.state;
         assert_eq!(state_after_initialization.num_passes, 2);
         assert_eq!(state_after_initialization.num_deleted_queues, 1);
