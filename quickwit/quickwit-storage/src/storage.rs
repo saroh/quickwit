@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -142,7 +142,7 @@ pub trait Storage: Send + Sync + 'static {
 #[must_use]
 #[derive(Debug, Default, thiserror::Error)]
 pub struct BulkDeleteError {
-    /// Error that ocurred for a whole batch and caused the entire deletion operation to be
+    /// Error that occurred for a whole batch and caused the entire deletion operation to be
     /// aborted.
     pub error: Option<StorageError>,
     /// List of files that were successfully deleted, including non-existing files.

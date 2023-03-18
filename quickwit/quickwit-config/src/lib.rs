@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -38,7 +38,7 @@ mod templating;
 
 // We export that one for backward compatibility.
 // See #2048
-use index_config::serialize::{IndexConfigV0_4, VersionedIndexConfig};
+use index_config::serialize::{IndexConfigV0_5, VersionedIndexConfig};
 pub use index_config::{
     build_doc_mapper, load_index_config_from_user_config, DocMapping, IndexConfig,
     IndexingResources, IndexingSettings, RetentionPolicy, SearchSettings,
@@ -47,9 +47,9 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 pub use source_config::{
-    FileSourceParams, KafkaSourceParams, KinesisSourceParams, RegionOrEndpoint, SourceConfig,
-    SourceParams, TransformConfig, VecSourceParams, VoidSourceParams, CLI_INGEST_SOURCE_ID,
-    INGEST_API_SOURCE_ID,
+    load_source_config_from_user_config, FileSourceParams, KafkaSourceParams, KinesisSourceParams,
+    PulsarSourceAuth, PulsarSourceParams, RegionOrEndpoint, SourceConfig, SourceParams,
+    TransformConfig, VecSourceParams, VoidSourceParams, CLI_INGEST_SOURCE_ID, INGEST_API_SOURCE_ID,
 };
 use tracing::warn;
 
@@ -60,7 +60,7 @@ pub use crate::quickwit_config::{
     IndexerConfig, IngestApiConfig, JaegerConfig, QuickwitConfig, SearcherConfig,
     DEFAULT_QW_CONFIG_PATH,
 };
-use crate::source_config::serialize::{SourceConfigV0_4, VersionedSourceConfig};
+use crate::source_config::serialize::{SourceConfigV0_5, VersionedSourceConfig};
 
 #[derive(utoipa::OpenApi)]
 #[openapi(components(schemas(
@@ -71,16 +71,21 @@ use crate::source_config::serialize::{SourceConfigV0_4, VersionedSourceConfig};
     MergePolicyConfig,
     DocMapping,
     VersionedSourceConfig,
-    SourceConfigV0_4,
+    SourceConfigV0_5,
     VersionedIndexConfig,
-    IndexConfigV0_4,
+    IndexConfigV0_5,
     SourceParams,
     FileSourceParams,
     KafkaSourceParams,
     KinesisSourceParams,
+    PulsarSourceParams,
+    PulsarSourceAuth,
     RegionOrEndpoint,
     ConstWriteAmplificationMergePolicyConfig,
     StableLogMergePolicyConfig,
+    TransformConfig,
+    VecSourceParams,
+    VoidSourceParams,
 )))]
 /// Schema used for the OpenAPI generation which are apart of this crate.
 pub struct ConfigApiSchemas;
@@ -109,6 +114,14 @@ pub enum ConfigFormat {
 }
 
 impl ConfigFormat {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConfigFormat::Json => "json",
+            ConfigFormat::Toml => "toml",
+            ConfigFormat::Yaml => "yaml",
+        }
+    }
+
     pub fn sniff_from_uri(uri: &Uri) -> anyhow::Result<ConfigFormat> {
         let extension_str: &str = uri.extension().with_context(|| {
             anyhow::anyhow!(
@@ -135,8 +148,10 @@ impl ConfigFormat {
                 serde_json::from_value(json_value).context("Failed to read JSON file.")
             }
             ConfigFormat::Toml => {
+                let payload_str = std::str::from_utf8(payload)
+                    .context("Configuration file contains invalid UTF-8 characters.")?;
                 let mut toml_value: toml::Value =
-                    toml::from_slice(payload).context("Failed to read TOML file.")?;
+                    toml::from_str(payload_str).context("Failed to read TOML file.")?;
                 let version_value = toml_value.get_mut("version").context("Missing version.")?;
                 if let Some(version_number) = version_value.as_integer() {
                     warn!("`version` is supposed to be a string.");
@@ -145,7 +160,7 @@ impl ConfigFormat {
                         .context("Failed to reserialize toml config.")?;
                     toml::from_str(&reserialized).context("Failed to read TOML file.")
                 } else {
-                    toml::from_slice(payload).context("Failed to read TOML file.")
+                    toml::from_str(payload_str).context("Failed to read TOML file.")
                 }
             }
             ConfigFormat::Yaml => {

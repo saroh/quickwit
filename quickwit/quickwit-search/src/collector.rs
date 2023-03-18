@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -24,6 +24,7 @@ use std::sync::Arc;
 use itertools::Itertools;
 use quickwit_doc_mapper::{DocMapper, WarmupInfo};
 use quickwit_proto::{LeafSearchResponse, PartialHit, SearchRequest, SortOrder};
+use serde::Deserialize;
 use tantivy::aggregation::agg_req::{
     get_fast_field_names, get_term_dict_field_names, Aggregations,
 };
@@ -31,10 +32,10 @@ use tantivy::aggregation::intermediate_agg_result::IntermediateAggregationResult
 use tantivy::aggregation::AggregationSegmentCollector;
 use tantivy::collector::{Collector, SegmentCollector};
 use tantivy::fastfield::Column;
-use tantivy::schema::Schema;
 use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader};
 
-use crate::filters::{TimestampFilter, TimestampFilterBuilder};
+use crate::filters::{create_timestamp_filter_builder, TimestampFilter, TimestampFilterBuilder};
+use crate::find_trace_ids_collector::{FindTraceIdsCollector, FindTraceIdsSegmentCollector};
 use crate::partial_hit_sorting_key;
 
 #[derive(Clone, Debug)]
@@ -110,15 +111,11 @@ fn resolve_sort_by(
     match sort_by {
         SortBy::DocId => Ok(SortingFieldComputer::DocId),
         SortBy::FastField { field_name, order } => {
-            if let Some(field) = segment_reader.schema().get_field(field_name) {
-                let fast_field_reader = segment_reader.fast_fields().u64_lenient(field)?;
-                Ok(SortingFieldComputer::FastField {
-                    fast_field_reader,
-                    order: *order,
-                })
-            } else {
-                Ok(SortingFieldComputer::DocId)
-            }
+            let fast_field_reader = segment_reader.fast_fields().u64_lenient(field_name)?;
+            Ok(SortingFieldComputer::FastField {
+                fast_field_reader,
+                order: *order,
+            })
         }
         SortBy::Score { order } => Ok(SortingFieldComputer::Score { order: *order }),
     }
@@ -165,6 +162,11 @@ impl PartialEq for PartialHitHeapItem {
 
 impl Eq for PartialHitHeapItem {}
 
+enum AggregationSegmentCollectors {
+    FindTraceIdsSegmentCollector(FindTraceIdsSegmentCollector),
+    TantivyAggregationSegmentCollector(AggregationSegmentCollector),
+}
+
 /// Quickwit collector working at the scale of the segment.
 pub struct QuickwitSegmentCollector {
     num_hits: u64,
@@ -174,7 +176,7 @@ pub struct QuickwitSegmentCollector {
     max_hits: usize,
     segment_ord: u32,
     timestamp_filter_opt: Option<TimestampFilter>,
-    aggregation: Option<AggregationSegmentCollector>,
+    aggregation: Option<AggregationSegmentCollectors>,
 }
 
 impl QuickwitSegmentCollector {
@@ -223,8 +225,15 @@ impl SegmentCollector for QuickwitSegmentCollector {
 
         self.num_hits += 1;
         self.collect_top_k(doc_id, score);
-        if let Some(aggregation_collector) = self.aggregation.as_mut() {
-            aggregation_collector.collect(doc_id, score);
+
+        match self.aggregation.as_mut() {
+            Some(AggregationSegmentCollectors::FindTraceIdsSegmentCollector(collector)) => {
+                collector.collect(doc_id, score)
+            }
+            Some(AggregationSegmentCollectors::TantivyAggregationSegmentCollector(collector)) => {
+                collector.collect(doc_id, score)
+            }
+            None => (),
         }
     }
 
@@ -244,15 +253,19 @@ impl SegmentCollector for QuickwitSegmentCollector {
             })
             .collect();
 
-        let intermediate_aggregation_result = if let Some(collector) = self.aggregation {
-            Some(
-                serde_json::to_string(&collector.harvest()?)
-                    .expect("could not serialize aggregation to json"),
-            )
-        } else {
-            None
+        let intermediate_aggregation_result = match self.aggregation {
+            Some(AggregationSegmentCollectors::FindTraceIdsSegmentCollector(collector)) => Some(
+                serde_json::to_string(&collector.harvest())
+                    .expect("Collector fruit should be JSON serializable."),
+            ),
+            Some(AggregationSegmentCollectors::TantivyAggregationSegmentCollector(collector)) => {
+                Some(
+                    serde_json::to_string(&collector.harvest()?)
+                        .expect("Collector fruit should be JSON serializable."),
+                )
+            }
+            None => None,
         };
-
         Ok(LeafSearchResponse {
             intermediate_aggregation_result,
             num_hits: self.num_hits,
@@ -260,6 +273,41 @@ impl SegmentCollector for QuickwitSegmentCollector {
             failed_splits: vec![],
             num_attempted_splits: 1,
         })
+    }
+}
+
+/// Available aggregation types.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum QuickwitAggregations {
+    /// Aggregation used by the Jaeger service to find trace IDs that match a
+    /// [`quickwit_proto::jaeger::storage::v1::FindTraceIDsRequest`].
+    FindTraceIdsAggregation(FindTraceIdsCollector),
+    /// Your classic Tantivy aggregation.
+    TantivyAggregations(Aggregations),
+}
+
+impl QuickwitAggregations {
+    fn fast_field_names(&self) -> HashSet<String> {
+        match self {
+            QuickwitAggregations::FindTraceIdsAggregation(collector) => {
+                collector.fast_field_names()
+            }
+            QuickwitAggregations::TantivyAggregations(aggregations) => {
+                get_fast_field_names(aggregations)
+            }
+        }
+    }
+
+    fn term_dict_field_names(&self) -> HashSet<String> {
+        match self {
+            QuickwitAggregations::FindTraceIdsAggregation(collector) => {
+                collector.term_dict_field_names()
+            }
+            QuickwitAggregations::TantivyAggregations(aggregations) => {
+                get_term_dict_field_names(aggregations)
+            }
+        }
     }
 }
 
@@ -274,7 +322,7 @@ pub(crate) struct QuickwitCollector {
     pub max_hits: usize,
     pub sort_by: SortBy,
     timestamp_filter_builder_opt: Option<TimestampFilterBuilder>,
-    pub aggregation: Option<Aggregations>,
+    pub aggregation: Option<QuickwitAggregations>,
 }
 
 impl QuickwitCollector {
@@ -286,21 +334,23 @@ impl QuickwitCollector {
                 fast_field_names.insert(field_name.clone());
             }
         }
-        if let Some(aggregate) = self.aggregation.as_ref() {
-            fast_field_names.extend(get_fast_field_names(aggregate));
+        if let Some(aggregations) = &self.aggregation {
+            fast_field_names.extend(aggregations.fast_field_names());
         }
         if let Some(timestamp_filter_builder) = &self.timestamp_filter_builder_opt {
             fast_field_names.insert(timestamp_filter_builder.timestamp_field_name.clone());
         }
         fast_field_names
     }
+
     pub fn term_dict_field_names(&self) -> HashSet<String> {
         let mut term_dict_field_names = HashSet::default();
-        if let Some(aggregate) = self.aggregation.as_ref() {
-            term_dict_field_names.extend(get_term_dict_field_names(aggregate));
+        if let Some(aggregations) = &self.aggregation {
+            term_dict_field_names.extend(aggregations.term_dict_field_names());
         }
         term_dict_field_names
     }
+
     pub fn warmup_info(&self) -> WarmupInfo {
         WarmupInfo {
             term_dict_field_names: self.term_dict_field_names(),
@@ -327,13 +377,27 @@ impl Collector for QuickwitCollector {
         // starting from 0 for every leaves.
         let leaf_max_hits = self.max_hits + self.start_offset;
 
-        let timestamp_filter_opt =
-            if let Some(timestamp_filter_builder) = &self.timestamp_filter_builder_opt {
-                timestamp_filter_builder.build(segment_reader)?
-            } else {
-                None
-            };
-
+        let timestamp_filter_opt = match &self.timestamp_filter_builder_opt {
+            Some(timestamp_filter_builder) => timestamp_filter_builder.build(segment_reader)?,
+            None => None,
+        };
+        let aggregation = match &self.aggregation {
+            Some(QuickwitAggregations::FindTraceIdsAggregation(collector)) => {
+                Some(AggregationSegmentCollectors::FindTraceIdsSegmentCollector(
+                    collector.for_segment(0, segment_reader)?,
+                ))
+            }
+            Some(QuickwitAggregations::TantivyAggregations(aggs)) => Some(
+                AggregationSegmentCollectors::TantivyAggregationSegmentCollector(
+                    AggregationSegmentCollector::from_agg_req_and_reader(
+                        aggs,
+                        segment_reader,
+                        AGGREGATION_BUCKET_LIMIT,
+                    )?,
+                ),
+            ),
+            None => None,
+        };
         Ok(QuickwitSegmentCollector {
             num_hits: 0u64,
             split_id: self.split_id.clone(),
@@ -342,17 +406,7 @@ impl Collector for QuickwitCollector {
             segment_ord,
             max_hits: leaf_max_hits,
             timestamp_filter_opt,
-            aggregation: self
-                .aggregation
-                .as_ref()
-                .map(|aggs| {
-                    AggregationSegmentCollector::from_agg_req_and_reader(
-                        aggs,
-                        segment_reader,
-                        AGGREGATION_BUCKET_LIMIT,
-                    )
-                })
-                .transpose()?,
+            aggregation,
         })
     }
 
@@ -376,7 +430,8 @@ impl Collector for QuickwitCollector {
         // All leaves will return their top [0..max_hits) documents.
         // We compute the overall [0..start_offset + max_hits) documents ...
         let num_hits = self.start_offset + self.max_hits;
-        let mut merged_leaf_response = merge_leaf_responses(segment_fruits?, num_hits)?;
+        let mut merged_leaf_response =
+            merge_leaf_responses(&self.aggregation, segment_fruits?, num_hits)?;
         // ... and drop the first [..start_offsets) hits.
         merged_leaf_response
             .partial_hits
@@ -392,6 +447,7 @@ impl Collector for QuickwitCollector {
 
 /// Merges a set of Leaf Results.
 fn merge_leaf_responses(
+    aggregations_opt: &Option<QuickwitAggregations>,
     leaf_responses: Vec<LeafSearchResponse>,
     max_hits: usize,
 ) -> tantivy::Result<LeafSearchResponse> {
@@ -399,24 +455,46 @@ fn merge_leaf_responses(
     if leaf_responses.len() == 1 {
         return Ok(leaf_responses.into_iter().next().unwrap_or_default()); //< default is actually never called
     }
-    let intermediate_aggregation_results = leaf_responses
-        .iter()
-        .flat_map(|leaf_response| {
-            leaf_response
-                .intermediate_aggregation_result
-                .as_ref()
-                .map(|res| serde_json::from_str(res))
-        })
-        .collect::<Result<Vec<IntermediateAggregationResults>, _>>()?;
+    let merged_intermediate_aggregation_result = match aggregations_opt {
+        Some(QuickwitAggregations::FindTraceIdsAggregation(collector)) => {
+            let fruits: Vec<
+                <<FindTraceIdsCollector as Collector>::Child as SegmentCollector>::Fruit,
+            > = leaf_responses
+                .iter()
+                .filter_map(|leaf_response| {
+                    leaf_response.intermediate_aggregation_result.as_ref().map(
+                        |intermediate_aggregation_result| {
+                            serde_json::from_str(intermediate_aggregation_result)
+                        },
+                    )
+                })
+                .collect::<Result<_, _>>()?;
+            let merged_fruit = collector.merge_fruits(fruits)?;
+            Some(serde_json::to_string(&merged_fruit)?)
+        }
+        Some(QuickwitAggregations::TantivyAggregations(_)) => {
+            let fruits: Vec<IntermediateAggregationResults> = leaf_responses
+                .iter()
+                .filter_map(|leaf_response| {
+                    leaf_response.intermediate_aggregation_result.as_ref().map(
+                        |intermediate_aggregation_result| {
+                            serde_json::from_str(intermediate_aggregation_result)
+                        },
+                    )
+                })
+                .collect::<Result<_, _>>()?;
 
-    let intermediate_aggregation_result =
-        intermediate_aggregation_results
-            .into_iter()
-            .reduce(|mut res1, res2| {
-                res1.merge_fruits(res2);
-                res1
-            });
-
+            fruits
+                .into_iter()
+                .reduce(|mut left, right| {
+                    left.merge_fruits(right);
+                    left
+                })
+                .map(|merged_fruit| serde_json::to_string(&merged_fruit))
+                .transpose()?
+        }
+        None => None,
+    };
     let num_attempted_splits = leaf_responses
         .iter()
         .map(|leaf_response| leaf_response.num_attempted_splits)
@@ -437,10 +515,7 @@ fn merge_leaf_responses(
     // TODO optimize
     let top_k_partial_hits = top_k_partial_hits(all_partial_hits, max_hits);
     Ok(LeafSearchResponse {
-        intermediate_aggregation_result: intermediate_aggregation_result
-            .as_ref()
-            .map(serde_json::to_string)
-            .transpose()?,
+        intermediate_aggregation_result: merged_intermediate_aggregation_result,
         num_hits,
         partial_hits: top_k_partial_hits,
         failed_splits,
@@ -467,18 +542,13 @@ pub(crate) fn make_collector_for_split(
     split_id: String,
     doc_mapper: &dyn DocMapper,
     search_request: &SearchRequest,
-    split_schema: &Schema,
 ) -> crate::Result<QuickwitCollector> {
-    let aggregation = if let Some(agg) = &search_request.aggregation_request {
-        Some(serde_json::from_str(agg)?)
-    } else {
-        None
+    let aggregation = match &search_request.aggregation_request {
+        Some(aggregation) => Some(serde_json::from_str(aggregation)?),
+        None => None,
     };
-
-    let timestamp_field_opt = doc_mapper.timestamp_field(split_schema);
-    let timestamp_filter_builder_opt = TimestampFilterBuilder::new(
+    let timestamp_filter_builder_opt = create_timestamp_filter_builder(
         doc_mapper.timestamp_field_name(),
-        timestamp_field_opt,
         search_request.start_timestamp,
         search_request.end_timestamp,
     );
@@ -518,10 +588,9 @@ pub(crate) fn make_collector_for_split(
 pub(crate) fn make_merge_collector(
     search_request: &SearchRequest,
 ) -> crate::Result<QuickwitCollector> {
-    let aggregation = if let Some(agg) = search_request.aggregation_request.as_ref() {
-        Some(serde_json::from_str(agg)?)
-    } else {
-        None
+    let aggregation = match &search_request.aggregation_request {
+        Some(aggregation) => Some(serde_json::from_str(aggregation)?),
+        None => None,
     };
     Ok(QuickwitCollector {
         split_id: String::default(),
@@ -574,7 +643,7 @@ mod tests {
     fn test_merge_partial_hits_with_tie() {
         let make_hit_given_split_id = |split_id: u64| PartialHit {
             sorting_field_value: 0u64,
-            split_id: format!("split_{}", split_id),
+            split_id: format!("split_{split_id}"),
             segment_ord: 0u32,
             doc_id: 0u32,
         };

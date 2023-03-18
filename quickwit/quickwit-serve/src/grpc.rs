@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -20,14 +20,15 @@
 use std::collections::BTreeSet;
 use std::net::SocketAddr;
 
-use anyhow::Context;
 use quickwit_config::service::QuickwitService;
-use quickwit_control_plane::grpc_adapter::GrpcControlPlaneAdapter;
+use quickwit_control_plane::control_plane_service_grpc_server::ControlPlaneServiceGrpcServer;
+use quickwit_control_plane::ControlPlaneServiceGrpcServerAdapter;
 use quickwit_indexing::grpc_adapter::GrpcIndexingAdapter;
+use quickwit_ingest_api::ingest_service_grpc_server::IngestServiceGrpcServer;
+use quickwit_ingest_api::IngestServiceGrpcServerAdapter;
 use quickwit_jaeger::JaegerService;
 use quickwit_metastore::GrpcMetastoreAdapter;
 use quickwit_opentelemetry::otlp::{OtlpGrpcLogsService, OtlpGrpcTraceService};
-use quickwit_proto::control_plane_api::control_plane_service_server::ControlPlaneServiceServer;
 use quickwit_proto::indexing_api::indexing_service_server::IndexingServiceServer;
 use quickwit_proto::jaeger::storage::v1::span_reader_plugin_server::SpanReaderPluginServer;
 use quickwit_proto::metastore_api::metastore_api_service_server::MetastoreApiServiceServer;
@@ -71,12 +72,21 @@ pub(crate) async fn start_grpc_server(
     } else {
         None
     };
+    // Mount gRPC ingest service if `QuickwitService::Indexer` is enabled on node.
+    let ingest_api_grpc_service = if services.services.contains(&QuickwitService::Indexer) {
+        enabled_grpc_services.insert("ingest_api");
+        let ingest_service_adapter =
+            IngestServiceGrpcServerAdapter::new(services.ingest_service.clone());
+        Some(IngestServiceGrpcServer::new(ingest_service_adapter))
+    } else {
+        None
+    };
     // Mount gRPC control plane service if `QuickwitService::ControlPlane` is enabled on node.
     let control_plane_grpc_service = if services.services.contains(&QuickwitService::ControlPlane) {
-        if let Some(indexing_scheduler_service) = services.indexing_scheduler_service.as_ref() {
-            enabled_grpc_services.insert("control_plane");
-            let grpc_indexing = GrpcControlPlaneAdapter::from(indexing_scheduler_service.clone());
-            Some(ControlPlaneServiceServer::new(grpc_indexing))
+        if let Some(control_plane_client) = &services.control_plane_service {
+            enabled_grpc_services.insert("control-plane");
+            let adapter = ControlPlaneServiceGrpcServerAdapter::new(control_plane_client.clone());
+            Some(ControlPlaneServiceGrpcServer::new(adapter))
         } else {
             None
         }
@@ -90,11 +100,8 @@ pub(crate) async fn start_grpc_server(
         && services.services.contains(&QuickwitService::Indexer)
     {
         enabled_grpc_services.insert("otlp-trace");
-        let ingest_api_service = services
-            .ingest_api_service
-            .clone()
-            .context("Failed to instantiate OTLP trace service: the ingest API is disabled.")?;
-        let trace_service = TraceServiceServer::new(OtlpGrpcTraceService::new(ingest_api_service))
+        let ingest_service = services.ingest_service.clone();
+        let trace_service = TraceServiceServer::new(OtlpGrpcTraceService::new(ingest_service))
             .accept_compressed(CompressionEncoding::Gzip);
         Some(trace_service)
     } else {
@@ -103,12 +110,9 @@ pub(crate) async fn start_grpc_server(
     let otlp_log_grpc_service = if enable_opentelemetry_otlp_grpc_service
         && services.services.contains(&QuickwitService::Indexer)
     {
-        enabled_grpc_services.insert("otlp-log");
-        let ingest_api_service = services
-            .ingest_api_service
-            .clone()
-            .context("Failed to instantiate OTLP log service: the ingest API is disabled.")?;
-        let logs_service = LogsServiceServer::new(OtlpGrpcLogsService::new(ingest_api_service))
+        enabled_grpc_services.insert("otlp-logs");
+        let ingest_service = services.ingest_service.clone();
+        let logs_service = LogsServiceServer::new(OtlpGrpcLogsService::new(ingest_service))
             .accept_compressed(CompressionEncoding::Gzip);
         Some(logs_service)
     } else {
@@ -139,6 +143,7 @@ pub(crate) async fn start_grpc_server(
         .add_optional_service(metastore_grpc_service)
         .add_optional_service(control_plane_grpc_service)
         .add_optional_service(indexing_grpc_service)
+        .add_optional_service(ingest_api_grpc_service)
         .add_optional_service(otlp_log_grpc_service)
         .add_optional_service(otlp_trace_service)
         .add_optional_service(search_grpc_service)

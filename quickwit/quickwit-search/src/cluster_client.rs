@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -19,8 +19,8 @@
 
 use futures::StreamExt;
 use quickwit_proto::{
-    FetchDocsRequest, FetchDocsResponse, LeafSearchRequest, LeafSearchResponse,
-    LeafSearchStreamRequest, LeafSearchStreamResponse,
+    FetchDocsRequest, FetchDocsResponse, LeafListTermsRequest, LeafListTermsResponse,
+    LeafSearchRequest, LeafSearchResponse, LeafSearchStreamRequest, LeafSearchStreamResponse,
 };
 use tantivy::aggregation::intermediate_agg_result::IntermediateAggregationResults;
 use tokio::sync::mpsc::error::SendError;
@@ -29,7 +29,7 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 use tracing::debug;
 
 use crate::retry::search::LeafSearchRetryPolicy;
-use crate::retry::search_stream::{LeafSearchStreamRetryPolicy, SuccessfullSplitIds};
+use crate::retry::search_stream::{LeafSearchStreamRetryPolicy, SuccessfulSplitIds};
 use crate::retry::{retry_client, DefaultRetryPolicy, RetryPolicy};
 use crate::{SearchError, SearchJobPlacer, SearchServiceClient};
 
@@ -144,6 +144,16 @@ impl ClusterClient {
 
         UnboundedReceiverStream::new(result_receiver)
     }
+
+    /// Leaf search with retry on another node client.
+    pub async fn leaf_list_terms(
+        &self,
+        request: LeafListTermsRequest,
+        mut client: SearchServiceClient,
+    ) -> crate::Result<LeafListTermsResponse> {
+        // TODO: implement retry
+        client.leaf_list_terms(request.clone()).await
+    }
 }
 
 // Merge initial leaf search results with results obtained from a retry.
@@ -196,7 +206,7 @@ async fn forward_leaf_search_stream(
     mut stream: UnboundedReceiverStream<crate::Result<LeafSearchStreamResponse>>,
     sender: UnboundedSender<crate::Result<LeafSearchStreamResponse>>,
     send_error: bool,
-) -> Result<SuccessfullSplitIds, SendError<crate::Result<LeafSearchStreamResponse>>> {
+) -> Result<SuccessfulSplitIds, SendError<crate::Result<LeafSearchStreamResponse>>> {
     let mut successful_split_ids: Vec<String> = Vec::new();
     while let Some(result) = stream.next().await {
         match result {
@@ -211,7 +221,7 @@ async fn forward_leaf_search_stream(
             }
         }
     }
-    Ok(SuccessfullSplitIds(successful_split_ids))
+    Ok(SuccessfulSplitIds(successful_split_ids))
 }
 
 #[cfg(test)]

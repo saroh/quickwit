@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -113,7 +113,7 @@ impl<A: Actor> Handler<Command> for A {
 
 /// Asks the actor to update its ObservableState.
 ///
-/// The observation is then available using the `ActorHander::last_observation()`
+/// The observation is then available using the `ActorHandler::last_observation()`
 /// method.
 #[derive(Debug)]
 pub(crate) struct Observe;

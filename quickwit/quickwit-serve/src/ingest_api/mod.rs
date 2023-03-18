@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -17,9 +17,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-mod grpc_adapter;
 mod rest_handler;
 
-pub use rest_handler::{
-    elastic_bulk_handler, ingest_handler, tail_handler, BulkApiError, IngestApi, IngestApiSchemas,
-};
+pub(crate) use rest_handler::ingest_api_handlers;
+pub use rest_handler::{IngestApi, IngestApiSchemas};

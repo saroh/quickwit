@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -28,8 +28,8 @@ mod collector;
 mod error;
 mod fetch_docs;
 mod filters;
+mod find_trace_ids_collector;
 mod leaf;
-mod rendezvous_hasher;
 mod retry;
 mod root;
 mod search_job_placer;
@@ -42,6 +42,7 @@ mod metrics;
 #[cfg(test)]
 mod tests;
 
+pub use collector::QuickwitAggregations;
 use metrics::SEARCH_METRICS;
 use quickwit_doc_mapper::DocMapper;
 use root::validate_request;
@@ -55,13 +56,13 @@ use std::cmp::Reverse;
 use std::sync::Arc;
 
 use anyhow::Context;
+pub use find_trace_ids_collector::FindTraceIdsCollector;
 use itertools::Itertools;
 use quickwit_config::{build_doc_mapper, QuickwitConfig, SearcherConfig};
 use quickwit_doc_mapper::tag_pruning::extract_tags_from_query;
 use quickwit_metastore::{ListSplitsQuery, Metastore, SplitMetadata, SplitState};
 use quickwit_proto::{Hit, PartialHit, SearchRequest, SearchResponse, SplitIdAndFooterOffsets};
 use quickwit_storage::StorageUriResolver;
-use tantivy::aggregation::agg_req::Aggregations;
 use tantivy::aggregation::agg_result::AggregationResults;
 use tantivy::aggregation::intermediate_agg_result::IntermediateAggregationResults;
 use tantivy::DocAddress;
@@ -70,8 +71,8 @@ pub use crate::client::{create_search_service_client, SearchServiceClient};
 pub use crate::cluster_client::ClusterClient;
 pub use crate::error::{parse_grpc_error, SearchError};
 use crate::fetch_docs::fetch_docs;
-use crate::leaf::leaf_search;
-pub use crate::root::{jobs_to_leaf_request, root_search, SearchJob};
+use crate::leaf::{leaf_list_terms, leaf_search};
+pub use crate::root::{jobs_to_leaf_request, root_list_terms, root_search, SearchJob};
 pub use crate::search_job_placer::SearchJobPlacer;
 pub use crate::search_response_rest::SearchResponseRest;
 pub use crate::search_stream::root_search_stream;
@@ -181,7 +182,7 @@ pub async fn single_node_search(
         metas.iter().map(extract_split_and_footer_offsets).collect();
     let doc_mapper = build_doc_mapper(&index_config.doc_mapping, &index_config.search_settings)
         .map_err(|err| {
-            SearchError::InternalError(format!("Failed to build doc mapper. Cause: {}", err))
+            SearchError::InternalError(format!("Failed to build doc mapper. Cause: {err}"))
         })?;
 
     validate_request(search_request)?;
@@ -229,11 +230,24 @@ pub async fn single_node_search(
     let aggregation = if let Some(intermediate_aggregation_result) =
         leaf_search_response.intermediate_aggregation_result
     {
-        let res: IntermediateAggregationResults =
-            serde_json::from_str(&intermediate_aggregation_result)?;
-        let req: Aggregations = serde_json::from_str(search_request.aggregation_request())?;
-        let res: AggregationResults = res.into_final_bucket_result(req, &schema)?;
-        Some(serde_json::to_string(&res)?)
+        let aggregations: QuickwitAggregations =
+            serde_json::from_str(search_request.aggregation_request.as_ref().expect(
+                "Aggregation should be present since we are processing an intermediate \
+                 aggregation result.",
+            ))?;
+        match aggregations {
+            QuickwitAggregations::FindTraceIdsAggregation(_) => {
+                // There is nothing to merge here because there is only one leaf response.
+                Some(intermediate_aggregation_result)
+            }
+            QuickwitAggregations::TantivyAggregations(aggregations) => {
+                let res: IntermediateAggregationResults =
+                    serde_json::from_str(&intermediate_aggregation_result)?;
+                let res: AggregationResults =
+                    res.into_final_bucket_result(aggregations, &schema)?;
+                Some(serde_json::to_string(&res)?)
+            }
+        }
     } else {
         None
     };
@@ -245,7 +259,7 @@ pub async fn single_node_search(
         errors: leaf_search_response
             .failed_splits
             .iter()
-            .map(|error| format!("{:?}", error))
+            .map(|error| format!("{error:?}"))
             .collect_vec(),
     })
 }
@@ -266,4 +280,21 @@ pub async fn start_searcher_service(
         quickwit_config.searcher_config.clone(),
     ));
     Ok(search_service)
+}
+
+/// Creates a tantivy Term from a &str.
+#[cfg(any(test, feature = "testsuite"))]
+#[macro_export]
+macro_rules! encode_term_for_test {
+    ($field:expr, $value:expr) => {
+        ::tantivy::schema::Term::from_field_text(
+            ::tantivy::schema::Field::from_field_id($field),
+            $value,
+        )
+        .as_slice()
+        .to_vec()
+    };
+    ($value:expr) => {
+        encode_term_for_test!(0, $value)
+    };
 }

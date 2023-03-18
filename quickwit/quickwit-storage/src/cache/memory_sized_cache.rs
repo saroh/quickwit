@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -195,7 +195,7 @@ impl<K: Hash + Eq> MemorySizedCache<K> {
         }
     }
 
-    /// Creates a slice cache that nevers removes any entry.
+    /// Creates a slice cache that never removes any entry.
     pub fn with_infinite_capacity(cache_counters: &'static CacheMetrics) -> Self {
         MemorySizedCache {
             inner: Mutex::new(NeedMutMemorySizedCache::with_capacity(

@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -185,9 +185,9 @@ mod tests {
         merge_split_downloader_handler
             .process_pending_and_observe()
             .await;
-        let merge_scratchs = merge_executor_inbox.drain_for_test();
-        assert_eq!(merge_scratchs.len(), 1);
-        let merge_scratch = merge_scratchs
+        let merge_scratches = merge_executor_inbox.drain_for_test();
+        assert_eq!(merge_scratches.len(), 1);
+        let merge_scratch = merge_scratches
             .into_iter()
             .next()
             .unwrap()
@@ -202,6 +202,7 @@ mod tests {
                 .join(split_filename);
             assert!(split_filepath.try_exists().unwrap());
         }
+        universe.assert_quit().await;
         Ok(())
     }
 }

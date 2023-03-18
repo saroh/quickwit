@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -23,10 +23,10 @@ use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
 
 use anyhow::bail;
+use quickwit_common::rendezvous_hasher::sort_by_rendez_vous_hash;
 use quickwit_grpc_clients::service_client_pool::ServiceClientPool;
 use tracing::error;
 
-use crate::rendezvous_hasher::sort_by_rendez_vous_hash;
 use crate::SearchServiceClient;
 
 /// Job.
@@ -35,7 +35,7 @@ use crate::SearchServiceClient;
 /// The `split_id` is used to define an affinity between a leaf nodes and a job.
 /// The `cost` is used to spread the work evenly amongst nodes.
 pub trait Job {
-    /// SplitId of the split that is targetted.
+    /// SplitId of the split that is targeted.
     fn split_id(&self) -> &str;
     /// Estimation of the load associated with running a given job.
     ///
@@ -102,7 +102,7 @@ impl SearchJobPlacer {
             // TODO optimize the case where there are few jobs and many clients.
             let clients = self.clients();
 
-            // when exclude_addresses excludes all adresses we discard it
+            // when exclude_addresses excludes all addresses we discard it
             let empty_set = HashSet::default();
             let exclude_addresses_if_not_saturated = if exclude_addresses.len() == clients.len() {
                 &empty_set

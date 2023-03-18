@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -63,6 +63,8 @@ mod ingest_api_source;
 mod kafka_source;
 #[cfg(feature = "kinesis")]
 mod kinesis;
+#[cfg(feature = "pulsar")]
+mod pulsar_source;
 mod source_factory;
 mod vec_source;
 mod void_source;
@@ -79,6 +81,8 @@ pub use kafka_source::{KafkaSource, KafkaSourceFactory};
 #[cfg(feature = "kinesis")]
 pub use kinesis::kinesis_source::{KinesisSource, KinesisSourceFactory};
 use once_cell::sync::OnceCell;
+#[cfg(feature = "pulsar")]
+pub use pulsar_source::{PulsarSource, PulsarSourceFactory};
 use quickwit_actors::{Actor, ActorContext, ActorExitStatus, Handler, Mailbox};
 use quickwit_common::runtimes::RuntimeType;
 use quickwit_config::{SourceConfig, SourceParams};
@@ -286,6 +290,8 @@ pub fn quickwit_supported_sources() -> &'static SourceLoader {
         source_factory.add_source("kafka", KafkaSourceFactory);
         #[cfg(feature = "kinesis")]
         source_factory.add_source("kinesis", KinesisSourceFactory);
+        #[cfg(feature = "pulsar")]
+        source_factory.add_source("pulsar", PulsarSourceFactory);
         source_factory.add_source("vec", VecSourceFactory);
         source_factory.add_source("void", VoidSourceFactory);
         source_factory.add_source("ingest-api", IngestApiSourceFactory);
@@ -325,6 +331,17 @@ pub async fn check_source_connectivity(source_config: &SourceConfig) -> anyhow::
                 Ok(())
             }
         }
+        #[allow(unused_variables)]
+        SourceParams::Pulsar(params) => {
+            #[cfg(not(feature = "pulsar"))]
+            bail!("Quickwit binary was not compiled with the `pulsar` feature.");
+
+            #[cfg(feature = "pulsar")]
+            {
+                pulsar_source::check_connectivity(params).await?;
+                Ok(())
+            }
+        }
         _ => Ok(()),
     }
 }
@@ -353,6 +370,9 @@ impl Handler<SuggestTruncate> for SourceActor {
 
 #[cfg(test)]
 mod tests {
+
+    use std::num::NonZeroUsize;
+
     use quickwit_config::VecSourceParams;
 
     use super::*;
@@ -362,8 +382,8 @@ mod tests {
         {
             let source_config = SourceConfig {
                 source_id: "void".to_string(),
-                desired_num_pipelines: 1,
-                max_num_pipelines_per_indexer: 1,
+                desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
                 enabled: true,
                 source_params: SourceParams::void(),
                 transform_config: None,
@@ -373,8 +393,8 @@ mod tests {
         {
             let source_config = SourceConfig {
                 source_id: "vec".to_string(),
-                desired_num_pipelines: 1,
-                max_num_pipelines_per_indexer: 1,
+                desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
                 enabled: true,
                 source_params: SourceParams::Vec(VecSourceParams::default()),
                 transform_config: None,
@@ -384,8 +404,8 @@ mod tests {
         {
             let source_config = SourceConfig {
                 source_id: "file".to_string(),
-                desired_num_pipelines: 1,
-                max_num_pipelines_per_indexer: 1,
+                desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
                 enabled: true,
                 source_params: SourceParams::file("file-does-not-exist.json"),
                 transform_config: None,
@@ -395,8 +415,8 @@ mod tests {
         {
             let source_config = SourceConfig {
                 source_id: "file".to_string(),
-                desired_num_pipelines: 1,
-                max_num_pipelines_per_indexer: 1,
+                desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
                 enabled: true,
                 source_params: SourceParams::file("data/test_corpus.json"),
                 transform_config: None,

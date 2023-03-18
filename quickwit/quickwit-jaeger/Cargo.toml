@@ -1,6 +1,6 @@
 [package]
 name = "quickwit-jaeger"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Quickwit, Inc. <hello@quickwit.io>"]
 edition = "2021"
 license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
@@ -19,6 +19,7 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tantivy = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -32,4 +33,7 @@ quickwit-proto = { workspace = true }
 quickwit-search = { workspace = true }
 
 [dev-dependencies]
-tantivy = { workspace = true }
+quickwit-search = { workspace = true, features = ["testsuite"] }
+
+[features]
+testsuite = []

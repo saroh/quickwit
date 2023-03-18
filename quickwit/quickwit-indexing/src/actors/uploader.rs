@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -244,7 +244,7 @@ impl Actor for Uploader {
         // a queue capacity.
         //
         // Having a large queue is costly too, because each message is a handle over
-        // a split directory. We DO need agressive backpressure here.
+        // a split directory. We DO need aggressive backpressure here.
         QueueCapacity::Bounded(0)
     }
 
@@ -275,7 +275,7 @@ impl Handler<PackagedSplitBatch> for Uploader {
         // This is not a valid usage of protected zone here.
         //
         // Protected zone are supposed to be used when the cause for blocking is
-        // outside of the responsability of the current actor.
+        // outside of the responsibility of the current actor.
         // For instance, when sending a message on a downstream actor with a saturated
         // mailbox.
         // This is meant to be fixed with ParallelActors.
@@ -427,6 +427,7 @@ mod tests {
     use quickwit_metastore::checkpoint::{IndexCheckpointDelta, SourceCheckpointDelta};
     use quickwit_metastore::MockMetastore;
     use quickwit_storage::RamStorage;
+    use tantivy::DateTime;
     use tokio::sync::oneshot;
 
     use super::*;
@@ -468,7 +469,7 @@ mod tests {
         let split_scratch_directory = ScratchDirectory::for_test();
         let checkpoint_delta_opt: Option<IndexCheckpointDelta> = Some(IndexCheckpointDelta {
             source_id: "test-source".to_string(),
-            source_delta: SourceCheckpointDelta::from(3..15),
+            source_delta: SourceCheckpointDelta::from_range(3..15),
         });
         uploader_mailbox
             .send_message(PackagedSplitBatch::new(
@@ -476,7 +477,10 @@ mod tests {
                     split_attrs: SplitAttrs {
                         partition_id: 3u64,
                         pipeline_id,
-                        time_range: Some(1_628_203_589i64..=1_628_203_640i64),
+                        time_range: Some(
+                            DateTime::from_timestamp_secs(1_628_203_589)
+                                ..=DateTime::from_timestamp_secs(1_628_203_640),
+                        ),
                         uncompressed_docs_size_in_bytes: 1_000,
                         num_docs: 10,
                         replaced_split_ids: Vec::new(),
@@ -525,12 +529,13 @@ mod tests {
         assert_eq!(checkpoint_delta.source_id, "test-source");
         assert_eq!(
             checkpoint_delta.source_delta,
-            SourceCheckpointDelta::from(3..15)
+            SourceCheckpointDelta::from_range(3..15)
         );
         assert!(replaced_split_ids.is_empty());
         let mut files = ram_storage.list_files().await;
         files.sort();
         assert_eq!(&files, &[PathBuf::from("test-split.split")]);
+        universe.assert_quit().await;
         Ok(())
     }
 
@@ -578,7 +583,10 @@ mod tests {
                 pipeline_id: pipeline_id.clone(),
                 num_docs: 10,
                 uncompressed_docs_size_in_bytes: 1_000,
-                time_range: Some(1_628_203_589i64..=1_628_203_640i64),
+                time_range: Some(
+                    DateTime::from_timestamp_secs(1_628_203_589)
+                        ..=DateTime::from_timestamp_secs(1_628_203_640),
+                ),
                 replaced_split_ids: vec![
                     "replaced-split-1".to_string(),
                     "replaced-split-2".to_string(),
@@ -598,7 +606,10 @@ mod tests {
                 pipeline_id,
                 num_docs: 10,
                 uncompressed_docs_size_in_bytes: 1_000,
-                time_range: Some(1_628_203_589i64..=1_628_203_640i64),
+                time_range: Some(
+                    DateTime::from_timestamp_secs(1_628_203_589)
+                        ..=DateTime::from_timestamp_secs(1_628_203_640),
+                ),
                 replaced_split_ids: vec![
                     "replaced-split-1".to_string(),
                     "replaced-split-2".to_string(),
@@ -666,6 +677,7 @@ mod tests {
                 PathBuf::from("test-split-2.split")
             ]
         );
+        universe.assert_quit().await;
         Ok(())
     }
 
@@ -699,7 +711,7 @@ mod tests {
         let split_scratch_directory = ScratchDirectory::for_test();
         let checkpoint_delta_opt: Option<IndexCheckpointDelta> = Some(IndexCheckpointDelta {
             source_id: "test-source".to_string(),
-            source_delta: SourceCheckpointDelta::from(3..15),
+            source_delta: SourceCheckpointDelta::from_range(3..15),
         });
         uploader_mailbox
             .send_message(PackagedSplitBatch::new(
@@ -740,6 +752,7 @@ mod tests {
         assert_eq!(index_id, "test-index-no-sequencer");
         assert_eq!(new_splits.len(), 1);
         assert!(replaced_split_ids.is_empty());
+        universe.assert_quit().await;
         Ok(())
     }
 }

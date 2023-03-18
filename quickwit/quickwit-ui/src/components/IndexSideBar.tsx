@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -29,8 +29,10 @@ const IndexBarWrapper = styled('div')({
   display: 'flex',
   height: '100%',
   flex: '0 0 260px',
+  maxWidth: '260px',
   flexDirection: 'column',
   borderRight: '1px solid rgba(0, 0, 0, 0.12)',
+  overflow: 'auto',
 });
 
 function IndexAutocomplete(props: IndexMetadataProps) {
@@ -39,7 +41,7 @@ function IndexAutocomplete(props: IndexMetadataProps) {
   const [value, setValue] = React.useState<IndexMetadata | null>(null);
   const [loading, setLoading] = React.useState(false);
   // We want to show the circular progress only if we are loading some results and
-  // when there is no option avaiable.
+  // when there is no option available.
   const showLoading = loading && options.length === 0;
   const quickwitClient = useMemo(() => new Client(), []);
 
@@ -143,7 +145,7 @@ export function IndexSideBar(props: IndexMetadataProps) {
         </Typography>
         <IndexAutocomplete { ...props }/>
       </Box>
-      <Box sx={{ paddingLeft: "10px"}}>
+      <Box sx={{ paddingLeft: "10px", height: '100%'}}>
         <IconButton
             aria-label="expand row"
             size="small"
@@ -152,7 +154,7 @@ export function IndexSideBar(props: IndexMetadataProps) {
             {open ? <KeyboardArrowDown /> : <ChevronRight />}
         </IconButton>
         Fields
-        { open && <List dense={true} sx={{paddingTop: '0'}}>
+        { open && <List dense={true} sx={{paddingTop: '0', overflowWrap: 'break-word'}}>
           { fields.map(function(field) {
             return <ListItem
               key={ field.json_path }

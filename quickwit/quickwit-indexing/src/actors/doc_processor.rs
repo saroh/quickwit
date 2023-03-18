@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -20,6 +20,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use anyhow::Context;
 use async_trait::async_trait;
 use quickwit_actors::{Actor, ActorContext, ActorExitStatus, Handler, Mailbox, QueueCapacity};
 use quickwit_common::runtimes::RuntimeType;
@@ -28,6 +29,7 @@ use quickwit_doc_mapper::{DocMapper, DocParsingError};
 use serde::Serialize;
 use serde_json::Value as JsonValue;
 use tantivy::schema::{Field, Value};
+use tantivy::{DateTime, Document};
 use tokio::runtime::Handle;
 use tracing::warn;
 use vrl::{Program, Runtime, TargetValueRef, Terminate, TimeZone};
@@ -190,8 +192,7 @@ impl DocProcessor {
         indexer_mailbox: Mailbox<Indexer>,
         transform_config_opt: Option<TransformConfig>,
     ) -> anyhow::Result<Self> {
-        let schema = doc_mapper.schema();
-        let timestamp_field_opt = doc_mapper.timestamp_field(&schema);
+        let timestamp_field_opt = extract_timestamp_field(doc_mapper.as_ref())?;
         let transform_opt = transform_config_opt
             .map(VrlProgram::try_from_transform_config)
             .transpose()?;
@@ -205,6 +206,21 @@ impl DocProcessor {
             transform_opt,
         };
         Ok(doc_processor)
+    }
+
+    // Extract a timestamp from a tantivy document.
+    //
+    // If the timestamp is set up in the docmapper and the timestamp is missing,
+    // returns an PrepareDocumentError::MissingField error.
+    fn extract_timestamp(&self, doc: &Document) -> Result<Option<DateTime>, PrepareDocumentError> {
+        let Some(timestamp_field) = self.timestamp_field_opt else {
+            return Ok(None);
+        };
+        let timestamp = doc
+            .get_first(timestamp_field)
+            .and_then(Value::as_date)
+            .ok_or(PrepareDocumentError::MissingField)?;
+        Ok(Some(timestamp))
     }
 
     fn prepare_document(
@@ -232,30 +248,25 @@ impl DocProcessor {
                 _ => PrepareDocumentError::ParsingError,
             }
         })?;
-        // Extract timestamp if necessary
-        let Some(timestamp_field) = self.timestamp_field_opt else {
-            // No need to check the timestamp, there are no timestamp.
-            return Ok(PreparedDoc {
-                doc,
-                timestamp_opt: None,
-                partition,
-                num_bytes: json_doc.len(),
-            });
-        };
-        let timestamp = doc
-            .get_first(timestamp_field)
-            .and_then(|value| match value {
-                Value::Date(date_time) => Some(date_time.into_timestamp_secs()),
-                _ => None,
-            })
-            .ok_or(PrepareDocumentError::MissingField)?;
+        let timestamp_opt = self.extract_timestamp(&doc)?;
         Ok(PreparedDoc {
             doc,
-            timestamp_opt: Some(timestamp),
+            timestamp_opt,
             partition,
             num_bytes: json_doc.len(),
         })
     }
+}
+
+fn extract_timestamp_field(doc_mapper: &dyn DocMapper) -> anyhow::Result<Option<Field>> {
+    let schema = doc_mapper.schema();
+    let Some(timestamp_field_name) = doc_mapper.timestamp_field_name() else {
+        return Ok(None);
+    };
+    let timestamp_field = schema
+        .get_field(timestamp_field_name)
+        .context("Failed to find timestamp field in schema")?;
+    Ok(Some(timestamp_field))
 }
 
 #[async_trait]
@@ -332,6 +343,7 @@ impl Handler<RawDocBatch> for DocProcessor {
         let prepared_doc_batch = PreparedDocBatch {
             docs: prepared_docs,
             checkpoint_delta: raw_doc_batch.checkpoint_delta,
+            force_commit: raw_doc_batch.force_commit,
         };
         ctx.send_message(&self.indexer_mailbox, prepared_doc_batch)
             .await?;
@@ -377,7 +389,10 @@ impl VrlProgram {
         let runtime_res = self
             .runtime
             .resolve(&mut target, &self.program, &self.timezone)
-            .map_err(PrepareDocumentError::TransformError);
+            .map_err(|transform_error| {
+                warn!(transform_error=?transform_error);
+                PrepareDocumentError::TransformError(transform_error)
+            });
 
         self.runtime.clear();
 
@@ -427,7 +442,7 @@ mod tests {
         .unwrap();
         let (doc_processor_mailbox, doc_processor_handle) =
             universe.spawn_builder().spawn(doc_processor);
-        let checkpoint_delta = SourceCheckpointDelta::from(0..4);
+        let checkpoint_delta = SourceCheckpointDelta::from_range(0..4);
         doc_processor_mailbox
             .send_message(RawDocBatch {
                 docs: vec![
@@ -437,6 +452,7 @@ mod tests {
                         "{".to_string(),                    // invalid json
                     ],
                 checkpoint_delta: checkpoint_delta.clone(),
+                force_commit: false,
             })
             .await?;
         let doc_processor_counters = doc_processor_handle
@@ -486,6 +502,7 @@ mod tests {
                  "timestamp": 1628837062
             })
         );
+        universe.assert_quit().await;
         Ok(())
     }
 
@@ -524,7 +541,8 @@ mod tests {
                     r#"{"tenant": "tenant_1", "body": "second doc for tenant 1"}"#.to_string(),
                     r#"{"tenant": "tenant_2", "body": "second doc for tenant 2"}"#.to_string(),
                 ],
-                checkpoint_delta: SourceCheckpointDelta::from(0..2),
+                checkpoint_delta: SourceCheckpointDelta::from_range(0..2),
+                force_commit: false,
             })
             .await?;
         universe
@@ -543,6 +561,7 @@ mod tests {
         assert_eq!(partition_ids[0], partition_ids[2]);
         assert_eq!(partition_ids[1], partition_ids[3]);
         assert_ne!(partition_ids[0], partition_ids[1]);
+        universe.assert_quit().await;
         Ok(())
     }
 
@@ -574,6 +593,7 @@ mod tests {
         assert!(matches!(exit_status, ActorExitStatus::Success));
         let publish_locks: Vec<NewPublishLock> = indexer_inbox.drain_for_test_typed();
         assert_eq!(&publish_locks, &[NewPublishLock(publish_lock)]);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -603,7 +623,8 @@ mod tests {
                 docs: vec![
                         r#"{"body": "happy", "timestamp": 1628837062, "response_date": "2021-12-19T16:39:59+00:00", "response_time": 2, "response_payload": "YWJj"}"#.to_string(),
                     ],
-                checkpoint_delta: SourceCheckpointDelta::from(0..1),
+                checkpoint_delta: SourceCheckpointDelta::from_range(0..1),
+                force_commit: false,
             })
             .await.unwrap();
         universe
@@ -614,6 +635,7 @@ mod tests {
         assert!(matches!(exit_status, ActorExitStatus::Success));
         let indexer_messages: Vec<PreparedDocBatch> = indexer_inbox.drain_for_test_typed();
         assert!(indexer_messages.is_empty());
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -634,7 +656,7 @@ mod tests {
         .unwrap();
         let (doc_processor_mailbox, doc_processor_handle) =
             universe.spawn_builder().spawn(doc_processor);
-        let checkpoint_delta = SourceCheckpointDelta::from(0..4);
+        let checkpoint_delta = SourceCheckpointDelta::from_range(0..4);
         doc_processor_mailbox
             .send_message(RawDocBatch {
                 docs: vec![
@@ -644,6 +666,7 @@ mod tests {
                         "{".to_string(),                    // invalid json
                     ],
                 checkpoint_delta: checkpoint_delta.clone(),
+                force_commit: false,
             })
             .await?;
         let doc_processor_counters = doc_processor_handle
@@ -693,6 +716,7 @@ mod tests {
                  "timestamp": 1628837062
             })
         );
+        universe.assert_quit().await;
         Ok(())
     }
 }

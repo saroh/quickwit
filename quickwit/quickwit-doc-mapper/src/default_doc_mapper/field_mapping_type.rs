@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -27,7 +27,7 @@ use crate::default_doc_mapper::field_mapping_entry::{
 
 /// A `FieldMappingType` defines the type and indexing options
 /// of a mapping field.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FieldMappingType {
     /// String mapping type configuration.
     Text(QuickwitTextOptions, Cardinality),

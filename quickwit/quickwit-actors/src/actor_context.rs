@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -35,8 +35,8 @@ use crate::spawn_builder::{SpawnBuilder, SpawnContext};
 #[cfg(any(test, feature = "testsuite"))]
 use crate::Universe;
 use crate::{
-    Actor, ActorExitStatus, ActorState, AskError, Command, Handler, Mailbox, SendError,
-    TrySendError,
+    Actor, ActorExitStatus, ActorState, AskError, Command, DeferableReplyHandler, Mailbox,
+    SendError, TrySendError,
 };
 
 // TODO hide all of this public stuff
@@ -226,7 +226,7 @@ impl<A: Actor> ActorContext<A> {
     /// more indicated.
     ///
     /// Droppping the receiver channel will not cancel the
-    /// processing of the messsage. It is a very common usage.
+    /// processing of the message. It is a very common usage.
     /// In fact most actors are expected to send message in a
     /// fire-and-forget fashion.
     ///
@@ -242,7 +242,7 @@ impl<A: Actor> ActorContext<A> {
         msg: M,
     ) -> Result<oneshot::Receiver<DestActor::Reply>, SendError>
     where
-        DestActor: Handler<M>,
+        DestActor: DeferableReplyHandler<M>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let _guard = self.protect_zone();
@@ -261,7 +261,7 @@ impl<A: Actor> ActorContext<A> {
         msg: M,
     ) -> Result<T, AskError<Infallible>>
     where
-        DestActor: Handler<M, Reply = T>,
+        DestActor: DeferableReplyHandler<M, Reply = T>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let _guard = self.protect_zone();
@@ -273,14 +273,15 @@ impl<A: Actor> ActorContext<A> {
 
     /// Similar to `send_message`, except this method
     /// waits asynchronously for the actor reply.
-    pub async fn ask_for_res<DestActor: Actor, M, T, E: fmt::Debug>(
+    pub async fn ask_for_res<DestActor: Actor, M, T, E>(
         &self,
         mailbox: &Mailbox<DestActor>,
         msg: M,
     ) -> Result<T, AskError<E>>
     where
-        DestActor: Handler<M, Reply = Result<T, E>>,
-        M: 'static + Send + Sync + fmt::Debug,
+        DestActor: DeferableReplyHandler<M, Reply = Result<T, E>>,
+        M: fmt::Debug + Send + Sync + 'static,
+        E: fmt::Debug,
     {
         let _guard = self.protect_zone();
         debug!(from=%self.self_mailbox.actor_instance_id(), send=%mailbox.actor_instance_id(), msg=?msg, "ask");
@@ -310,7 +311,7 @@ impl<A: Actor> ActorContext<A> {
         msg: M,
     ) -> Result<oneshot::Receiver<A::Reply>, SendError>
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Sync + Send + fmt::Debug,
     {
         debug!(self=%self.self_mailbox.actor_instance_id(), msg=?msg, "self_send");
@@ -327,7 +328,7 @@ impl<A: Actor> ActorContext<A> {
         msg: M,
     ) -> Result<oneshot::Receiver<A::Reply>, TrySendError<M>>
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Sync + Send + fmt::Debug,
     {
         self.self_mailbox.try_send_message(msg)
@@ -337,7 +338,7 @@ impl<A: Actor> ActorContext<A> {
     /// queue of the actor Mailbox once `after_duration` has elapsed.
     pub async fn schedule_self_msg<M>(&self, after_duration: Duration, message: M)
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: Sync + Send + std::fmt::Debug + 'static,
     {
         let self_mailbox = self.inner.self_mailbox.clone();

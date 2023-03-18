@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -205,7 +205,7 @@ mod tests {
                         && checkpoint_delta.source_id == "source"
                         && split_ids[..] == ["split"]
                         && replaced_split_ids.is_empty()
-                        && checkpoint_delta.source_delta == SourceCheckpointDelta::from(1..3)
+                        && checkpoint_delta.source_delta == SourceCheckpointDelta::from_range(1..3)
                 },
             )
             .times(1)
@@ -232,7 +232,7 @@ mod tests {
                 replaced_split_ids: Vec::new(),
                 checkpoint_delta_opt: Some(IndexCheckpointDelta {
                     source_id: "source".to_string(),
-                    source_delta: SourceCheckpointDelta::from(1..3),
+                    source_delta: SourceCheckpointDelta::from_range(1..3),
                 }),
                 publish_lock: PublishLock::default(),
                 merge_operation: None,
@@ -261,6 +261,7 @@ mod tests {
         let merger_msgs: Vec<NewSplits> = merge_planner_inbox.drain_for_test_typed::<NewSplits>();
         assert_eq!(merger_msgs.len(), 1);
         assert_eq!(merger_msgs[0].new_splits.len(), 1);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -309,6 +310,7 @@ mod tests {
         let merge_planner_msgs = merge_planner_inbox.drain_for_test_typed::<NewSplits>();
         assert_eq!(merge_planner_msgs.len(), 1);
         assert_eq!(merge_planner_msgs[0].new_splits.len(), 1);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -347,5 +349,6 @@ mod tests {
 
         let merger_messages = merge_planner_inbox.drain_for_test();
         assert!(merger_messages.is_empty());
+        universe.assert_quit().await;
     }
 }

@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -311,6 +311,7 @@ impl Source for KinesisSource {
             let batch = RawDocBatch {
                 docs,
                 checkpoint_delta,
+                force_commit: false,
             };
             ctx.send_message(indexer_mailbox, batch).await?;
         }
@@ -357,7 +358,7 @@ pub(super) fn get_region(region_or_endpoint: Option<RegionOrEndpoint>) -> anyhow
     if let Some(RegionOrEndpoint::Region(region)) = region_or_endpoint {
         return region
             .parse()
-            .with_context(|| format!("Failed to parse region: `{}`", region));
+            .with_context(|| format!("Failed to parse region: `{region}`"));
     }
 
     sniff_aws_region_and_cache() //< We fallback to AWS region if `region_or_endpoint` is `None`

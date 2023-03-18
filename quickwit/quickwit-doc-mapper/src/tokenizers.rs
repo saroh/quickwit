@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -186,7 +186,7 @@ mod tests {
             res.push(tok.clone());
         }
 
-        // latin alphabet splited on white spaces, Han splitted on each char
+        // latin alphabet splited on white spaces, Han split on each char
         let expected = [
             Token {
                 offset_from: 0,

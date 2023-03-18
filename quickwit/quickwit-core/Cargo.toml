@@ -1,6 +1,6 @@
 [package]
 name = "quickwit-core"
-version = "0.4.0"
+version = "0.5.0"
 authors = ["Quickwit, Inc. <hello@quickwit.io>"]
 edition = "2021"
 license = "AGPL-3.0-or-later"                           # For a commercial, license, contact hello@quickwit.io
@@ -26,7 +26,6 @@ tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 
-quickwit-actors = { workspace = true }
 quickwit-common = { workspace = true }
 quickwit-config = { workspace = true }
 quickwit-directories = { workspace = true }

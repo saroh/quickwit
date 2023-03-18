@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -45,7 +45,7 @@ use crate::{IndexMetadata, SplitMetadata};
 ///     #[serde(rename="0.2")]
 ///     V0_2(MyResourceV1) //< there was no change in this version.
 /// }
-const GLOBAL_QUICKWIT_RESOURCE_VERSION: &str = "0.4";
+const GLOBAL_QUICKWIT_RESOURCE_VERSION: &str = "0.5";
 
 /// This test makes sure that the resource is using the current `GLOBAL_QUICKWIT_RESOURCE_VERSION`.
 fn test_global_version<T: Serialize>(serializable: &T) -> anyhow::Result<()> {
@@ -127,8 +127,7 @@ where for<'a> T: Deserialize<'a> + Serialize {
     }
     assert!(
         updated_expected_files.is_empty(),
-        "The following expected files need to be updated. {:?}",
-        updated_expected_files
+        "The following expected files need to be updated. {updated_expected_files:?}"
     );
     Ok(())
 }
@@ -146,7 +145,7 @@ where for<'a> T: Serialize {
     let mut sample_json = serde_json::to_string_pretty(&sample_json_value)?;
     sample_json.push('\n');
     let md5_digest = md5::compute(&sample_json);
-    let test_name = format!("v{}-{:x}", version, md5_digest);
+    let test_name = format!("v{version}-{md5_digest:x}");
     let file_regression_test_path = format!("{}/{}.json", test_dir.display(), test_name);
     let file_regression_expected_path =
         format!("{}/{}.expected.json", test_dir.display(), test_name);

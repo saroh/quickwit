@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -18,11 +18,9 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 pub mod balance_channel;
-pub mod control_plane_client;
 pub mod service_client_pool;
 
 pub use balance_channel::create_balance_channel_from_watched_members;
-pub use control_plane_client::ControlPlaneGrpcClient;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 

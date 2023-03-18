@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -25,13 +25,19 @@ use quickwit_metastore::checkpoint::SourceCheckpointDelta;
 pub struct RawDocBatch {
     pub docs: Vec<String>,
     pub checkpoint_delta: SourceCheckpointDelta,
+    pub force_commit: bool,
 }
 
 impl RawDocBatch {
-    pub fn new(docs: Vec<String>, checkpoint_delta: SourceCheckpointDelta) -> Self {
+    pub fn new(
+        docs: Vec<String>,
+        checkpoint_delta: SourceCheckpointDelta,
+        force_commit: bool,
+    ) -> Self {
         RawDocBatch {
             docs,
             checkpoint_delta,
+            force_commit,
         }
     }
 }
@@ -42,6 +48,7 @@ impl fmt::Debug for RawDocBatch {
             .debug_struct("RawDocBatch")
             .field("docs_len", &self.docs.len())
             .field("checkpoint_delta", &self.checkpoint_delta)
+            .field("force_commit", &self.force_commit)
             .finish()
     }
 }

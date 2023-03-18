@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -22,6 +22,7 @@ use std::fmt;
 use std::ops::{Range, RangeInclusive};
 use std::str::FromStr;
 
+use quickwit_common::FileEntry;
 use quickwit_config::TestableForRegression;
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -94,7 +95,7 @@ pub struct SplitMetadata {
     pub uncompressed_docs_size_in_bytes: u64,
 
     /// If a timestamp field is available, the min / max timestamp in
-    /// the split.
+    /// the split, expressed in seconds.
     pub time_range: Option<RangeInclusive<i64>>,
 
     /// Timestamp for tracking when the split was created.
@@ -162,6 +163,15 @@ impl SplitMetadata {
     }
 }
 
+impl From<&SplitMetadata> for FileEntry {
+    fn from(split: &SplitMetadata) -> Self {
+        FileEntry {
+            file_name: quickwit_common::split_file(split.split_id()),
+            file_size_in_bytes: split.footer_offsets.end,
+        }
+    }
+}
+
 impl TestableForRegression for SplitMetadata {
     fn sample_for_regression() -> Self {
         SplitMetadata {
@@ -201,7 +211,7 @@ pub enum SplitState {
 
 impl fmt::Display for SplitState {
     fn fmt(&self, f: &mut fmt::Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+        write!(f, "{self:?}")
     }
 }
 
@@ -226,7 +236,7 @@ impl FromStr for SplitState {
             "MarkedForDeletion" => SplitState::MarkedForDeletion,
             "ScheduledForDeletion" => SplitState::MarkedForDeletion, // Deprecated
             "New" => SplitState::Staged,                             // Deprecated
-            _ => return Err(format!("Unknown split state `{}`.", input)),
+            _ => return Err(format!("Unknown split state `{input}`.")),
         };
         Ok(split_state)
     }

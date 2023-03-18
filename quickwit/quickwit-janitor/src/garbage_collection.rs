@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -24,10 +24,9 @@ use std::time::Duration;
 
 use futures::Future;
 use quickwit_actors::ActorContext;
-use quickwit_common::PrettySample;
+use quickwit_common::{FileEntry, PrettySample};
 use quickwit_metastore::{ListSplitsQuery, Metastore, MetastoreError, SplitMetadata, SplitState};
 use quickwit_storage::Storage;
-use serde::Serialize;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tracing::{error, instrument};
@@ -46,24 +45,6 @@ pub enum SplitDeletionError {
         error: MetastoreError,
         failed_split_ids: Vec<String>,
     },
-}
-
-#[allow(missing_docs)]
-#[derive(Clone, Debug, Serialize, utoipa::ToSchema)]
-pub struct FileEntry {
-    /// The file_name is a file name, within an index directory.
-    pub file_name: String,
-    /// File size in bytes.
-    pub file_size_in_bytes: u64, //< TODO switch to `byte_unit::Byte`.
-}
-
-impl From<&SplitMetadata> for FileEntry {
-    fn from(split: &SplitMetadata) -> Self {
-        FileEntry {
-            file_name: quickwit_common::split_file(split.split_id()),
-            file_size_in_bytes: split.footer_offsets.end,
-        }
-    }
 }
 
 async fn protect_future<Fut, T>(
@@ -149,17 +130,20 @@ pub async fn run_garbage_collect(
         .iter()
         .map(|meta| meta.split_id())
         .collect();
-    protect_future(
-        ctx_opt,
-        metastore.mark_splits_for_deletion(index_id, &split_ids),
-    )
-    .await?;
+    if !split_ids.is_empty() {
+        protect_future(
+            ctx_opt,
+            metastore.mark_splits_for_deletion(index_id, &split_ids),
+        )
+        .await?;
+    }
 
-    // We wait another 2 minutes until the split is actually deleted.
+    // We delete splits marked for deletion that have an update timestamp anterior
+    // to `now - deletion_grace_period`.
     let updated_before_timestamp =
         OffsetDateTime::now_utc().unix_timestamp() - deletion_grace_period.as_secs() as i64;
 
-    let deleted_files = incrementally_remove_marked_splits(
+    let deleted_files = delete_splits_marked_for_deletion(
         index_id,
         updated_before_timestamp,
         storage,
@@ -172,12 +156,12 @@ pub async fn run_garbage_collect(
 }
 
 #[instrument(skip(storage, metastore, ctx_opt))]
-/// Incrementally removes any splits marked for deletion which haven't been
-/// updated after the given grace period in batches of 1000 splits.
+/// Removes any splits marked for deletion which haven't been
+/// updated after `updated_before_timestamp` in batches of 1000 splits.
 ///
 /// The aim of this is to spread the load out across a longer period
 /// rather than short, heavy bursts on the metastore and storage system itself.
-async fn incrementally_remove_marked_splits(
+async fn delete_splits_marked_for_deletion(
     index_id: &str,
     updated_before_timestamp: i64,
     storage: Arc<dyn Storage>,
@@ -342,10 +326,13 @@ pub async fn delete_splits_with_files(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
     use std::time::Duration;
 
     use quickwit_config::IndexConfig;
-    use quickwit_metastore::{metastore_for_test, ListSplitsQuery, SplitMetadata, SplitState};
+    use quickwit_metastore::{
+        metastore_for_test, ListSplitsQuery, MockMetastore, SplitMetadata, SplitState,
+    };
     use quickwit_storage::storage_for_test;
 
     use crate::run_garbage_collect;
@@ -469,5 +456,27 @@ mod tests {
 
         let query = ListSplitsQuery::for_index(index_id);
         assert_eq!(metastore.list_splits(query).await.unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_run_gc_deletes_splits_with_no_split() {
+        // Test that we make only 2 calls to the metastore.
+        let storage = storage_for_test();
+        let mut metastore = MockMetastore::new();
+        metastore
+            .expect_list_splits()
+            .times(2)
+            .returning(|_| Ok(Vec::new()));
+        run_garbage_collect(
+            "index-test-gc-deletes",
+            storage.clone(),
+            Arc::new(metastore),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
     }
 }

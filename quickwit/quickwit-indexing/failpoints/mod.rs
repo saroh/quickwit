@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -27,7 +27,7 @@
 //! They rely on a global variable, which requires them to be executed in a single
 //! thread.
 //! For this reason, we isolate them from the other unit tests and define an
-//! independant binary target.
+//! independent binary target.
 //!
 //! They are not executed by default.
 //! They are executed in CI and can be executed locally
@@ -36,11 +36,11 @@
 //! Below we test panics at different steps in the indexing pipeline.
 
 use std::path::Path;
-use std::sync::Mutex;
+use std::sync::{Arc, Barrier, Mutex};
 use std::time::Duration;
 
 use fail::FailScenario;
-use quickwit_actors::{ActorExitStatus, Universe};
+use quickwit_actors::ActorExitStatus;
 use quickwit_common::io::IoControls;
 use quickwit_common::rand::append_random_suffix;
 use quickwit_common::split_file;
@@ -138,7 +138,7 @@ async fn test_failpoint_uploader_panics_right_away() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn test_failpoint_uploader_panics_after_one_sucess() -> anyhow::Result<()> {
+async fn test_failpoint_uploader_panics_after_one_success() -> anyhow::Result<()> {
     let scenario = FailScenario::setup();
     fail::cfg_callback("uploader:before", deterministic_panic_sequence(vec![true])).unwrap();
     aux_test_failpoints().await?;
@@ -191,6 +191,7 @@ async fn aux_test_failpoints() -> anyhow::Result<()> {
         splits[1].split_metadata.time_range.clone().unwrap(),
         1629889532..=1629889533
     );
+    test_index_builder.universe().quit().await;
     Ok(())
 }
 
@@ -217,7 +218,6 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
     // do any write during a HEARTBEAT... Before removing the protect zone, we need
     // to investigate this instability. Then this test will finally be really helpful.
     quickwit_common::setup_logging_for_tests();
-    let universe = Universe::with_accelerated_time();
     let doc_mapper_yaml = r#"
         field_mappings:
           - name: body
@@ -230,7 +230,7 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
     let indexing_setting_yaml = r#"
         split_num_docs_target: 1000
         merge_policy:
-          type: "no_merge" 
+          type: "no_merge"
     "#;
     let search_fields = ["body"];
     let index_id = "test-index-merge-executory-kill-switch";
@@ -288,6 +288,8 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
         node_id: "test-node".to_string(),
         pipeline_ord: 0,
     };
+
+    let universe = test_index_builder.universe();
     let (merge_packager_mailbox, _merge_packager_inbox) = universe.create_test_mailbox();
     let io_controls = IoControls::default();
     let merge_executor = MergeExecutor::new(
@@ -297,6 +299,7 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
         io_controls,
         merge_packager_mailbox,
     );
+
     let (merge_executor_mailbox, merge_executor_handle) =
         universe.spawn_builder().spawn(merge_executor);
 
@@ -304,23 +307,32 @@ async fn test_merge_executor_controlled_directory_kill_switch() -> anyhow::Resul
     // aborted not by the actor framework, before the message is being processed.
     //
     // To do so, we
-    // - pause the actor right before the merge operation
-    // - send the message
-    // - wait 500ms to make sure the test has reached the "pause" point
+    // - set two barrier so the actor pauses right upon entering the process_merge function
+    // - send the merge message
+    // - wait on the first barrier to ensure that the actor has reached the process_merge function
     // - kill the universe
-    // - unpause
+    // - wait and release the second barrier so the actor can continue processing the merge message
     //
     // Before the controlled directory, the merge operation would have continued until it
     // finished, taking hundreds of millisecs to terminate.
-    fail::cfg("before-merge-split", "pause").unwrap();
+    let before_universe_kill = Arc::new(Barrier::new(2));
+    let after_universe_kill = Arc::new(Barrier::new(2));
+    let before_universe_kill_clone = before_universe_kill.clone();
+    let after_universe_kill_clone = after_universe_kill.clone();
+    fail::cfg_callback("before-merge-split", move || {
+        before_universe_kill_clone.wait();
+        after_universe_kill_clone.wait();
+    })
+    .unwrap();
     merge_executor_mailbox.send_message(merge_scratch).await?;
-
-    tokio::time::sleep(Duration::from_millis(10)).await;
+    before_universe_kill.wait();
     universe.kill();
-
+    after_universe_kill.wait();
     fail::cfg("before-merge-split", "off").unwrap();
 
     let (exit_status, _) = merge_executor_handle.join().await;
     assert!(matches!(exit_status, ActorExitStatus::Failure(_)));
+    universe.quit().await;
+
     Ok(())
 }

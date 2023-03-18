@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -26,7 +26,7 @@ use quickwit_elastic_api_generation::{download_artifacts, generate_api};
 pub const ES_ARTIFACTS_DIR_NAME: &str = "elastic-search-artifacts";
 pub const GENERATED_FILE_NAME: &str = "api_specs.rs";
 const GENERATED_FILE_HEADER: &str = r#"
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -45,7 +45,7 @@ const GENERATED_FILE_HEADER: &str = r#"
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
-/// This file is auto-generated, any change can be overriden.
+/// This file is auto-generated, any change can be overridden.
 "#;
 
 pub static ROOT_DIR: Lazy<path::PathBuf> = Lazy::new(|| {

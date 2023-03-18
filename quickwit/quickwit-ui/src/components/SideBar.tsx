@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -90,7 +90,8 @@ const SideBar = () => {
         </ListSubheader>
           <ListItemLink to="/indexes" primary={<Typography variant="body1">Indexes</Typography>} icon={<Database size="18px" />} />
           <ListItemLink to="/cluster" primary={<Typography variant="body1">Cluster</Typography>} icon={<GroupWork size="18px" />} />
-        <ListItemLink to="/node-info" primary={<Typography variant="body1">Node info</Typography>} icon={<Settings size="18px" />} />
+          <ListItemLink to="/node-info" primary={<Typography variant="body1">Node info</Typography>} icon={<Settings size="18px" />} />
+          <ListItemLink to="/api-playground" primary={<Typography variant="body1">API </Typography>} icon={<CodeSSlash size="18px" />} />
       </List>
     </SideBarWrapper>
   );

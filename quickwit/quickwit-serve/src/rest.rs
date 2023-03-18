@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -22,21 +22,29 @@ use std::net::SocketAddr;
 use hyper::http;
 use quickwit_common::metrics;
 use quickwit_proto::ServiceErrorCode;
+use tower::make::Shared;
+use tower::ServiceBuilder;
+use tower_http::compression::predicate::{DefaultPredicate, Predicate, SizeAbove};
+use tower_http::compression::CompressionLayer;
 use tracing::{error, info};
 use warp::{redirect, Filter, Rejection, Reply};
 
 use crate::cluster_api::cluster_handler;
 use crate::delete_task_api::delete_task_api_handlers;
 use crate::elastic_search_api::elastic_api_handlers;
-use crate::format::FormatError;
+use crate::format::ApiError;
 use crate::health_check_api::health_check_handlers;
 use crate::index_api::index_management_handlers;
 use crate::indexing_api::indexing_get_handler;
-use crate::ingest_api::{elastic_bulk_handler, ingest_handler, tail_handler};
+use crate::ingest_api::ingest_api_handlers;
 use crate::node_info_handler::node_info_handler;
 use crate::search_api::{search_get_handler, search_post_handler, search_stream_handler};
 use crate::ui_handler::ui_handler;
-use crate::{Format, QuickwitServices};
+use crate::{BodyFormat, QuickwitServices};
+
+/// The minimum size a response body must be in order to
+/// be automatically compressed with gzip.
+const MINIMUM_RESPONSE_COMPRESSION_SIZE: u16 = 10 << 10;
 
 /// Starts REST services.
 pub(crate) async fn start_rest_server(
@@ -65,6 +73,8 @@ pub(crate) async fn start_rest_server(
         .and(warp::get())
         .map(metrics::metrics_handler);
 
+    let ingest_service = quickwit_services.ingest_service.clone();
+
     // `/api/v1/*` routes.
     let api_v1_root_url = warp::path!("api" / "v1" / ..);
     let api_v1_routes = cluster_handler(quickwit_services.cluster.clone())
@@ -82,11 +92,7 @@ pub(crate) async fn start_rest_server(
         .or(search_stream_handler(
             quickwit_services.search_service.clone(),
         ))
-        .or(ingest_handler(quickwit_services.ingest_api_service.clone()))
-        .or(tail_handler(quickwit_services.ingest_api_service.clone()))
-        .or(elastic_bulk_handler(
-            quickwit_services.ingest_api_service.clone(),
-        ))
+        .or(ingest_api_handlers(ingest_service.clone()))
         .or(index_management_handlers(
             quickwit_services.index_service.clone(),
             quickwit_services.config.clone(),
@@ -97,8 +103,9 @@ pub(crate) async fn start_rest_server(
         .or(elastic_api_handlers());
 
     let api_v1_root_route = api_v1_root_url.and(api_v1_routes);
-    let redirect_root_to_ui_route =
-        warp::path::end().map(|| redirect(http::Uri::from_static("/ui/search")));
+    let redirect_root_to_ui_route = warp::path::end()
+        .and(warp::get())
+        .map(|| redirect(http::Uri::from_static("/ui/search")));
 
     // Combine all the routes together.
     let rest_routes = api_v1_root_route
@@ -108,10 +115,26 @@ pub(crate) async fn start_rest_server(
         .or(health_check_routes)
         .or(metrics_routes)
         .with(request_counter)
-        .recover(recover_fn);
+        .recover(recover_fn)
+        .boxed();
+
+    let warp_service = warp::service(rest_routes);
+    let compression_predicate =
+        DefaultPredicate::new().and(SizeAbove::new(MINIMUM_RESPONSE_COMPRESSION_SIZE));
+
+    let service = ServiceBuilder::new()
+        .layer(
+            CompressionLayer::new()
+                .gzip(true)
+                .compress_when(compression_predicate),
+        )
+        .service(warp_service);
 
     info!("Searcher ready to accept requests at http://{rest_listen_addr}/");
-    warp::serve(rest_routes).run(rest_listen_addr).await;
+
+    hyper::Server::bind(&rest_listen_addr)
+        .serve(Shared::new(service))
+        .await?;
     Ok(())
 }
 
@@ -128,71 +151,71 @@ pub(crate) async fn start_rest_server(
 // We may use this work on the PR is merged: https://github.com/seanmonstar/warp/pull/909.
 pub async fn recover_fn(rejection: Rejection) -> Result<impl Reply, Rejection> {
     let err = get_status_with_error(rejection);
-    Ok(Format::PrettyJson.make_reply_for_err(err))
+    Ok(BodyFormat::PrettyJson.make_reply_for_err(err))
 }
 
-fn get_status_with_error(rejection: Rejection) -> FormatError {
-    if rejection.is_not_found() {
-        FormatError {
+fn get_status_with_error(rejection: Rejection) -> ApiError {
+    if let Some(error) = rejection.find::<crate::index_api::UnsupportedContentType>() {
+        ApiError {
+            code: ServiceErrorCode::UnsupportedMediaType,
+            message: error.to_string(),
+        }
+    } else if rejection.is_not_found() {
+        ApiError {
             code: ServiceErrorCode::NotFound,
-            error: "Route not found".to_string(),
+            message: "Route not found".to_string(),
         }
     } else if let Some(error) = rejection.find::<serde_qs::Error>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::filters::body::BodyDeserializeError>() {
         // Happens when the request body could not be deserialized correctly.
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::reject::UnsupportedMediaType>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::UnsupportedMediaType,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::reject::InvalidQuery>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::reject::LengthRequired>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::reject::MissingHeader>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::reject::InvalidHeader>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::reject::MethodNotAllowed>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::MethodNotAllowed,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else if let Some(error) = rejection.find::<warp::reject::PayloadTooLarge>() {
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
-        }
-    } else if let Some(error) = rejection.find::<crate::ingest_api::BulkApiError>() {
-        FormatError {
-            code: ServiceErrorCode::BadRequest,
-            error: error.to_string(),
+            message: error.to_string(),
         }
     } else {
         error!("REST server error: {:?}", rejection);
-        FormatError {
+        ApiError {
             code: ServiceErrorCode::Internal,
-            error: "Internal server error.".to_string(),
+            message: "Internal server error.".to_string(),
         }
     }
 }

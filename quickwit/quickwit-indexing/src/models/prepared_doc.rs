@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -20,11 +20,11 @@
 use std::fmt;
 
 use quickwit_metastore::checkpoint::SourceCheckpointDelta;
-use tantivy::Document;
+use tantivy::{DateTime, Document};
 
 pub struct PreparedDoc {
     pub doc: Document,
-    pub timestamp_opt: Option<i64>,
+    pub timestamp_opt: Option<DateTime>,
     pub partition: u64,
     pub num_bytes: usize,
 }
@@ -42,6 +42,7 @@ impl fmt::Debug for PreparedDoc {
 pub struct PreparedDocBatch {
     pub docs: Vec<PreparedDoc>,
     pub checkpoint_delta: SourceCheckpointDelta,
+    pub force_commit: bool,
 }
 
 impl fmt::Debug for PreparedDocBatch {
@@ -49,6 +50,7 @@ impl fmt::Debug for PreparedDocBatch {
         f.debug_struct("PreparedDocBatch")
             .field("num_docs", &self.docs.len())
             .field("checkpoint_delta", &self.checkpoint_delta)
+            .field("force_commit", &self.force_commit)
             .finish()
     }
 }

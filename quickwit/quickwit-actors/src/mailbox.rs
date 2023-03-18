@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -32,7 +32,8 @@ use crate::channel_with_priority::{Receiver, Sender, TrySendError};
 use crate::envelope::{wrap_in_envelope, Envelope};
 use crate::scheduler::SchedulerClient;
 use crate::{
-    Actor, ActorContext, ActorExitStatus, AskError, Handler, QueueCapacity, RecvError, SendError,
+    Actor, ActorContext, ActorExitStatus, AskError, DeferableReplyHandler, Handler, QueueCapacity,
+    RecvError, SendError,
 };
 
 /// A mailbox is the object that makes it possible to send a message
@@ -172,7 +173,7 @@ impl<A: Actor> Mailbox<A> {
         message: M,
     ) -> Result<oneshot::Receiver<A::Reply>, SendError>
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         self.send_message_with_backpressure_counter(message, None)
@@ -187,7 +188,7 @@ impl<A: Actor> Mailbox<A> {
         message: M,
     ) -> Result<oneshot::Receiver<A::Reply>, TrySendError<M>>
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let (envelope, response_rx) = self.wrap_in_envelope(message);
@@ -209,7 +210,7 @@ impl<A: Actor> Mailbox<A> {
 
     fn wrap_in_envelope<M>(&self, message: M) -> (Envelope<A>, oneshot::Receiver<A::Reply>)
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let guard = self
@@ -231,25 +232,24 @@ impl<A: Actor> Mailbox<A> {
         backpressure_micros_counter_opt: Option<&IntCounter>,
     ) -> Result<oneshot::Receiver<A::Reply>, SendError>
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let (envelope, response_rx) = self.wrap_in_envelope(message);
-        if let Some(backpressure_micros_counter) = backpressure_micros_counter_opt {
-            match self.inner.tx.try_send_low_priority(envelope) {
-                Ok(()) => Ok(response_rx),
-                Err(TrySendError::Full(msg)) => {
+        match self.inner.tx.try_send_low_priority(envelope) {
+            Ok(()) => Ok(response_rx),
+            Err(TrySendError::Full(envelope)) => {
+                if let Some(backpressure_micros_counter) = backpressure_micros_counter_opt {
                     let now = Instant::now();
-                    self.inner.tx.send_low_priority(msg).await?;
+                    self.inner.tx.send_low_priority(envelope).await?;
                     let elapsed = now.elapsed();
                     backpressure_micros_counter.inc_by(elapsed.as_micros() as u64);
-                    Ok(response_rx)
+                } else {
+                    self.inner.tx.send_low_priority(envelope).await?;
                 }
-                Err(TrySendError::Disconnected) => Err(SendError::Disconnected),
+                Ok(response_rx)
             }
-        } else {
-            self.inner.tx.send_low_priority(envelope).await?;
-            Ok(response_rx)
+            Err(TrySendError::Disconnected) => Err(SendError::Disconnected),
         }
     }
 
@@ -258,7 +258,7 @@ impl<A: Actor> Mailbox<A> {
         message: M,
     ) -> Result<oneshot::Receiver<A::Reply>, SendError>
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let (envelope, response_rx) = self.wrap_in_envelope(message);
@@ -272,7 +272,7 @@ impl<A: Actor> Mailbox<A> {
         priority: Priority,
     ) -> Result<oneshot::Receiver<A::Reply>, SendError>
     where
-        A: Handler<M>,
+        A: DeferableReplyHandler<M>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let (envelope, response_rx) = self.wrap_in_envelope(message);
@@ -291,7 +291,7 @@ impl<A: Actor> Mailbox<A> {
     /// From an actor context, use the `ActorContext::ask` method instead.
     pub async fn ask<M, T>(&self, message: M) -> Result<T, AskError<Infallible>>
     where
-        A: Handler<M, Reply = T>,
+        A: DeferableReplyHandler<M, Reply = T>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         self.ask_with_backpressure_counter(message, None).await
@@ -314,7 +314,7 @@ impl<A: Actor> Mailbox<A> {
         backpressure_micros_counter_opt: Option<&IntCounter>,
     ) -> Result<T, AskError<Infallible>>
     where
-        A: Handler<M, Reply = T>,
+        A: DeferableReplyHandler<M, Reply = T>,
         M: 'static + Send + Sync + fmt::Debug,
     {
         let resp = self
@@ -329,10 +329,11 @@ impl<A: Actor> Mailbox<A> {
     /// waits asynchronously for the actor reply.
     ///
     /// From an actor context, use the `ActorContext::ask` method instead.
-    pub async fn ask_for_res<M, T, E: fmt::Debug>(&self, message: M) -> Result<T, AskError<E>>
+    pub async fn ask_for_res<M, T, E>(&self, message: M) -> Result<T, AskError<E>>
     where
-        A: Handler<M, Reply = Result<T, E>>,
-        M: 'static + Send + Sync + fmt::Debug,
+        A: DeferableReplyHandler<M, Reply = Result<T, E>>,
+        M: fmt::Debug + Send + Sync + 'static,
+        E: fmt::Debug,
     {
         self.send_message(message)
             .await
@@ -530,6 +531,7 @@ mod tests {
         assert!(backpressure_micros_counter.get() < 500);
         processed.await.unwrap();
         assert!(backpressure_micros_counter.get() < 500);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -554,7 +556,7 @@ mod tests {
             .await
             .unwrap();
         // That second message will present some backpressure, since the capacity is 0 and
-        // the first message willl take 1000 micros to be processed.
+        // the first message will take 1000 micros to be processed.
         mailbox
             .send_message_with_backpressure_counter(
                 Duration::default(),
@@ -563,6 +565,7 @@ mod tests {
             .await
             .unwrap();
         assert!(backpressure_micros_counter.get() > 1_000u64);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -584,6 +587,7 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed.as_micros() > 1000);
         assert_eq!(backpressure_micros_counter.get(), 0);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]

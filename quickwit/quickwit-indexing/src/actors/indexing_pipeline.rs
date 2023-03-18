@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -531,6 +531,7 @@ pub struct IndexingPipelineParams {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -558,7 +559,7 @@ mod tests {
     async fn test_indexing_pipeline_num_fails_before_success(
         mut num_fails: usize,
     ) -> anyhow::Result<bool> {
-        let universe = Universe::with_accelerated_time();
+        let universe = Universe::new();
         let mut metastore = MockMetastore::default();
         metastore
             .expect_index_metadata()
@@ -586,7 +587,6 @@ mod tests {
         metastore
             .expect_stage_splits()
             .withf(|index_id, _metadata| -> bool { index_id == "test-index" })
-            .times(1)
             .returning(|_, _| Ok(()));
         metastore
             .expect_publish_splits()
@@ -601,7 +601,6 @@ mod tests {
                             .ends_with(":(00000000000000000000..00000000000000001030])")
                 },
             )
-            .times(1)
             .returning(|_, _, _, _| Ok(()));
         let node_id = "test-node";
         let metastore = Arc::new(metastore);
@@ -613,8 +612,8 @@ mod tests {
         };
         let source_config = SourceConfig {
             source_id: "test-source".to_string(),
-            max_num_pipelines_per_indexer: 1,
-            desired_num_pipelines: 1,
+            max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+            desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
             enabled: true,
             source_params: SourceParams::file(PathBuf::from("data/test_corpus.json")),
             transform_config: None,
@@ -677,7 +676,6 @@ mod tests {
         metastore
             .expect_stage_splits()
             .withf(|index_id, _metadata| index_id == "test-index")
-            .times(1)
             .returning(|_, _| Ok(()));
         metastore
             .expect_publish_splits()
@@ -692,9 +690,8 @@ mod tests {
                             .ends_with(":(00000000000000000000..00000000000000001030])")
                 },
             )
-            .times(1)
             .returning(|_, _, _, _| Ok(()));
-        let universe = Universe::with_accelerated_time();
+        let universe = Universe::new();
         let node_id = "test-node";
         let metastore = Arc::new(metastore);
         let pipeline_id = IndexingPipelineId {
@@ -705,8 +702,8 @@ mod tests {
         };
         let source_config = SourceConfig {
             source_id: "test-source".to_string(),
-            max_num_pipelines_per_indexer: 1,
-            desired_num_pipelines: 1,
+            max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+            desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
             enabled: true,
             source_params: SourceParams::file(PathBuf::from("data/test_corpus.json")),
             transform_config: None,
@@ -735,6 +732,7 @@ mod tests {
         assert_eq!(pipeline_statistics.generation, 1);
         assert_eq!(pipeline_statistics.num_spawn_attempts, 1);
         assert_eq!(pipeline_statistics.num_published_splits, 1);
+        universe.assert_quit().await;
         Ok(())
     }
 
@@ -763,8 +761,8 @@ mod tests {
         };
         let source_config = SourceConfig {
             source_id: "test-source".to_string(),
-            max_num_pipelines_per_indexer: 1,
-            desired_num_pipelines: 1,
+            max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+            desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
             enabled: true,
             source_params: SourceParams::Void(VoidSourceParams),
             transform_config: None,
@@ -818,6 +816,7 @@ mod tests {
                 .await;
             if obs.generation == 2 {
                 assert_eq!(merge_pipeline_handler.harvest_health(), Health::Healthy);
+                universe.quit().await;
                 return;
             }
         }

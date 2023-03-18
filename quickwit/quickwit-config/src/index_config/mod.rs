@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -47,7 +47,7 @@ use crate::TestableForRegression;
 // This is partly a duplicate of the `DocMapper` and can
 // be viewed as a temporary hack for 0.2 release before
 // refactoring.
-#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct DocMapping {
     #[serde(default)]
@@ -279,7 +279,7 @@ fn prepend_at_char(schedule: &str) -> String {
     trimmed_schedule.to_string()
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 #[serde(into = "VersionedIndexConfig")]
 #[serde(try_from = "VersionedIndexConfig")]
@@ -676,7 +676,7 @@ mod tests {
     #[should_panic(expected = "empty URI")]
     fn test_config_validates_uris() {
         let config_yaml = r#"
-            version: 0.4
+            version: 0.5
             index_id: hdfs-logs
             index_uri: ''
             doc_mapping: {}
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn test_minimal_index_config_default_lenient() {
         let config_yaml = r#"
-            version: 0.4
+            version: 0.5
             index_id: hdfs-logs
             index_uri: "s3://my-index"
             doc_mapping: {}
@@ -704,7 +704,7 @@ mod tests {
     #[test]
     fn test_index_config_with_malformed_maturation_duration() {
         let config_yaml = r#"
-            version: 0.4
+            version: 0.5
             index_id: hdfs-logs
             index_uri: "s3://my-index"
             doc_mapping: {}
@@ -719,7 +719,7 @@ mod tests {
             &Uri::from_well_formed("s3://my-index"),
         )
         .unwrap_err();
-        println!("{:?}", parsing_config_error);
+        println!("{parsing_config_error:?}");
         assert!(parsing_config_error
             .root_cause()
             .to_string()

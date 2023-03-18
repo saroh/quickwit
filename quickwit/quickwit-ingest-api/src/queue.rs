@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -20,12 +20,14 @@
 use std::ops::Bound;
 use std::path::Path;
 
+use bytes::Buf;
 use mrecordlog::error::CreateQueueError;
 use mrecordlog::MultiRecordLog;
 use quickwit_actors::ActorContext;
-use quickwit_proto::ingest_api::{DocBatch, FetchResponse, ListQueuesResponse};
 
-use crate::{add_doc, IngestApiError, IngestApiService};
+use crate::{
+    DocBatchBuilder, FetchResponse, IngestApiService, IngestServiceError, ListQueuesResponse,
+};
 
 const FETCH_PAYLOAD_LIMIT: usize = 2_000_000; // 2MB
 
@@ -40,12 +42,11 @@ impl Queues {
     pub async fn open(queues_dir_path: &Path) -> crate::Result<Queues> {
         tokio::fs::create_dir_all(queues_dir_path).await.unwrap();
         let record_log = MultiRecordLog::open(queues_dir_path).await?;
-
         Ok(Queues { record_log })
     }
 
     pub fn queue_exists(&self, queue_id: &str) -> bool {
-        let real_queue_id = format!("{}{}", QUICKWIT_CF_PREFIX, queue_id);
+        let real_queue_id = format!("{QUICKWIT_CF_PREFIX}{queue_id}");
         self.record_log.queue_exists(&real_queue_id)
     }
 
@@ -55,15 +56,15 @@ impl Queues {
         ctx: &ActorContext<IngestApiService>,
     ) -> crate::Result<()> {
         if self.queue_exists(queue_id) {
-            return Err(crate::IngestApiError::IndexAlreadyExists {
+            return Err(crate::IngestServiceError::IndexAlreadyExists {
                 index_id: queue_id.to_string(),
             });
         }
-        let real_queue_id = format!("{}{}", QUICKWIT_CF_PREFIX, queue_id);
+        let real_queue_id = format!("{QUICKWIT_CF_PREFIX}{queue_id}");
         ctx.protect_future(self.record_log.create_queue(&real_queue_id))
             .await
             .map_err(|e| match e {
-                CreateQueueError::AlreadyExists => IngestApiError::IndexAlreadyExists {
+                CreateQueueError::AlreadyExists => IngestServiceError::IndexAlreadyExists {
                     index_id: queue_id.to_owned(),
                 },
                 CreateQueueError::IoError(ioe) => ioe.into(),
@@ -76,7 +77,7 @@ impl Queues {
         queue_id: &str,
         ctx: &ActorContext<IngestApiService>,
     ) -> crate::Result<()> {
-        let real_queue_id = format!("{}{}", QUICKWIT_CF_PREFIX, queue_id);
+        let real_queue_id = format!("{QUICKWIT_CF_PREFIX}{queue_id}");
         ctx.protect_future(self.record_log.delete_queue(&real_queue_id))
             .await?;
         Ok(())
@@ -101,7 +102,7 @@ impl Queues {
         up_to_offset_included: u64,
         ctx: &ActorContext<IngestApiService>,
     ) -> crate::Result<()> {
-        let real_queue_id = format!("{}{}", QUICKWIT_CF_PREFIX, queue_id);
+        let real_queue_id = format!("{QUICKWIT_CF_PREFIX}{queue_id}");
 
         ctx.protect_future(
             self.record_log
@@ -119,7 +120,7 @@ impl Queues {
         queue_id: &str,
         record: &[u8],
         ctx: &ActorContext<IngestApiService>,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<Option<u64>> {
         self.append_batch(queue_id, std::iter::once(record), ctx)
             .await
     }
@@ -130,19 +131,20 @@ impl Queues {
     pub async fn append_batch<'a>(
         &mut self,
         queue_id: &str,
-        records_it: impl Iterator<Item = &'a [u8]>,
+        records_it: impl Iterator<Item = impl Buf>,
         ctx: &ActorContext<IngestApiService>,
-    ) -> crate::Result<()> {
-        let real_queue_id = format!("{}{}", QUICKWIT_CF_PREFIX, queue_id);
+    ) -> crate::Result<Option<u64>> {
+        let real_queue_id = format!("{QUICKWIT_CF_PREFIX}{queue_id}");
 
         // TODO None means we don't have itempotent inserts
-        ctx.protect_future(
-            self.record_log
-                .append_records(&real_queue_id, None, records_it),
-        )
-        .await?;
+        let max_position = ctx
+            .protect_future(
+                self.record_log
+                    .append_records(&real_queue_id, None, records_it),
+            )
+            .await?;
 
-        Ok(())
+        Ok(max_position)
     }
 
     // Streams messages from in `]after_position, +∞[`.
@@ -154,7 +156,7 @@ impl Queues {
         start_after: Option<u64>,
         num_bytes_limit: Option<usize>,
     ) -> crate::Result<FetchResponse> {
-        let real_queue_id = format!("{}{}", QUICKWIT_CF_PREFIX, queue_id);
+        let real_queue_id = format!("{QUICKWIT_CF_PREFIX}{queue_id}");
 
         let starting_bound = match start_after {
             Some(pos) => Bound::Excluded(pos),
@@ -163,12 +165,12 @@ impl Queues {
         let records = self
             .record_log
             .range(&real_queue_id, (starting_bound, Bound::Unbounded))
-            .ok_or_else(|| crate::IngestApiError::IndexDoesNotExist {
+            .ok_or_else(|| crate::IngestServiceError::IndexNotFound {
                 index_id: queue_id.to_string(),
             })?;
 
         let size_limit = num_bytes_limit.unwrap_or(FETCH_PAYLOAD_LIMIT);
-        let mut doc_batch = DocBatch::default();
+        let mut doc_batch = DocBatchBuilder::new(queue_id.to_string());
         let mut num_bytes = 0;
         let mut first_key_opt = None;
 
@@ -176,7 +178,7 @@ impl Queues {
             if first_key_opt.is_none() {
                 first_key_opt = Some(pos);
             }
-            num_bytes += add_doc(record, &mut doc_batch);
+            num_bytes += doc_batch.command_from_buf(record.as_ref());
             if num_bytes > size_limit {
                 break;
             }
@@ -184,7 +186,7 @@ impl Queues {
 
         Ok(FetchResponse {
             first_position: first_key_opt,
-            doc_batch: Some(doc_batch),
+            doc_batch: Some(doc_batch.build()),
         })
     }
 
@@ -204,14 +206,12 @@ impl Queues {
         })
     }
 
-    /// Get ressource used by the queue.
-    ///
-    /// Returns the in-memory size, and the on disk size of the queue.
-    pub fn ressource_usage(&self) -> (usize, usize) {
-        (
-            self.record_log.in_memory_size(),
-            self.record_log.on_disk_size(),
-        )
+    pub(crate) fn disk_usage(&self) -> usize {
+        self.record_log.on_disk_size()
+    }
+
+    pub(crate) fn memory_usage(&self) -> usize {
+        self.record_log.in_memory_size()
     }
 }
 
@@ -220,12 +220,13 @@ mod tests {
     use std::collections::HashSet;
     use std::ops::{Deref, DerefMut};
 
+    use bytes::Bytes;
     use quickwit_actors::{ActorContext, Universe};
     use tokio::sync::watch;
 
     use super::Queues;
-    use crate::errors::IngestApiError;
-    use crate::{iter_doc_payloads, IngestApiService};
+    use crate::errors::IngestServiceError;
+    use crate::IngestApiService;
 
     const TEST_QUEUE_ID: &str = "my-queue";
     const TEST_QUEUE_ID2: &str = "my-queue2";
@@ -269,7 +270,7 @@ mod tests {
             let fetch_resp = self.fetch(queue_id, start_after, None).unwrap();
             assert_eq!(fetch_resp.first_position, expected_first_pos_opt);
             let doc_batch = fetch_resp.doc_batch.unwrap();
-            let records: Vec<&[u8]> = iter_doc_payloads(&doc_batch).collect();
+            let records: Vec<Bytes> = doc_batch.iter_raw().collect();
             assert_eq!(&records, expected);
         }
     }
@@ -305,7 +306,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             queue_err,
-            IngestApiError::IndexAlreadyExists { .. }
+            IngestServiceError::IndexAlreadyExists { .. }
         ));
     }
 
@@ -474,7 +475,6 @@ mod tests {
         let tmpdir = tempfile::tempdir_in(".").unwrap();
         let mut queues = Queues::open(tmpdir.path()).await.unwrap();
         for queue_id in 0..NUM_QUEUES {
-            println!("create queue {queue_id}");
             queues
                 .create_queue(&queue_id.to_string(), &ctx)
                 .await
@@ -493,6 +493,6 @@ mod tests {
         println!("{elapsed:?}");
         println!("{num_bytes}");
         let throughput = num_bytes as f64 / (elapsed.as_micros() as f64);
-        println!("throughput: {throughput}MB/s");
+        println!("Throughput: {throughput}");
     }
 }

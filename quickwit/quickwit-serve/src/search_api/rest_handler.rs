@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -23,17 +23,17 @@ use std::sync::Arc;
 use futures::stream::StreamExt;
 use hyper::header::HeaderValue;
 use hyper::HeaderMap;
+use quickwit_common::simple_list::{from_simple_list, to_simple_list};
 use quickwit_proto::{OutputFormat, ServiceError, SortOrder};
 use quickwit_search::{SearchError, SearchResponseRest, SearchService};
-use serde::{de, Deserialize, Deserializer};
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value as JsonValue;
 use tracing::info;
 use warp::hyper::header::CONTENT_TYPE;
 use warp::hyper::StatusCode;
 use warp::{reply, Filter, Rejection, Reply};
 
-use crate::elastic_search_api::from_simple_list;
-use crate::{with_arg, Format};
+use crate::{with_arg, BodyFormat};
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
@@ -44,13 +44,13 @@ use crate::{with_arg, Format};
         SortByField,
         SortOrder,
         OutputFormat,
-        Format,
+        BodyFormat,
     ),)
 )]
 pub struct SearchApi;
 
 #[derive(Debug, Eq, PartialEq, Deserialize, utoipa::ToSchema)]
-struct SortByField {
+pub struct SortByField {
     /// Name of the field to sort by.
     pub field_name: String,
     /// Order to sort by. A usual top-k search implies a descending order.
@@ -70,10 +70,21 @@ impl From<String> for SortByField {
     }
 }
 
-fn sort_by_field_mini_dsl<'de, D>(deserializer: D) -> Result<Option<SortByField>, D::Error>
+pub fn sort_by_field_mini_dsl<'de, D>(deserializer: D) -> Result<Option<SortByField>, D::Error>
 where D: Deserializer<'de> {
     let string = String::deserialize(deserializer)?;
     Ok(Some(SortByField::from(string)))
+}
+
+impl Serialize for SortByField {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where S: Serializer {
+        let sort_str = match self.order {
+            SortOrder::Desc => "-",
+            SortOrder::Asc => "",
+        };
+        serializer.serialize_str(&format!("{}{}", sort_str, self.field_name))
+    }
 }
 
 fn default_max_hits() -> u64 {
@@ -101,7 +112,9 @@ where D: Deserializer<'de> {
 
 /// This struct represents the QueryString passed to
 /// the rest API.
-#[derive(Debug, Default, Eq, PartialEq, Deserialize, utoipa::IntoParams, utoipa::ToSchema)]
+#[derive(
+    Debug, Default, Eq, PartialEq, Serialize, Deserialize, utoipa::IntoParams, utoipa::ToSchema,
+)]
 #[into_params(parameter_in = Query)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequestQueryString {
@@ -110,21 +123,30 @@ pub struct SearchRequestQueryString {
     #[param(value_type = Object)]
     #[schema(value_type = Object)]
     /// The aggregation JSON string.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub aggs: Option<JsonValue>,
     // Fields to search on
     #[param(rename = "search_field")]
     #[schema(rename = "search_field")]
     #[serde(default)]
-    #[serde(rename(deserialize = "search_field"))]
+    #[serde(rename = "search_field")]
     #[serde(deserialize_with = "from_simple_list")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "to_simple_list")]
     pub search_fields: Option<Vec<String>>,
     /// Fields to extract snippets on.
     #[serde(default)]
     #[serde(deserialize_with = "from_simple_list")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(serialize_with = "to_simple_list")]
     pub snippet_fields: Option<Vec<String>>,
     /// If set, restrict search to documents with a `timestamp >= start_timestamp`.
+    /// This timestamp is expressed in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub start_timestamp: Option<i64>,
     /// If set, restrict search to documents with a `timestamp < end_timestamp``.
+    /// This timestamp is expressed in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub end_timestamp: Option<i64>,
     /// Maximum number of hits to return (by default 20).
     #[serde(default = "default_max_hits")]
@@ -138,12 +160,13 @@ pub struct SearchRequestQueryString {
     pub start_offset: u64,
     /// The output format.
     #[serde(default)]
-    pub format: Format,
+    pub format: BodyFormat,
     /// Specifies how documents are sorted.
     #[param(value_type = Option<String>)]
     #[serde(deserialize_with = "sort_by_field_mini_dsl")]
     #[serde(default)]
-    sort_by_field: Option<SortByField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_by_field: Option<SortByField>,
 }
 
 fn get_proto_search_by(search_request: &SearchRequestQueryString) -> (Option<i32>, Option<String>) {
@@ -347,7 +370,7 @@ async fn search_stream_endpoint(
                     // need to look at the logs to understand that.
                     tracing::error!(error=?error, "Error when streaming search results.");
                     let header_value_str =
-                        format!("Error when streaming search results: {:?}.", error);
+                        format!("Error when streaming search results: {error:?}.");
                     let header_value = HeaderValue::from_str(header_value_str.as_str())
                         .unwrap_or_else(|_| HeaderValue::from_static("Search stream error"));
                     let mut trailers = HeaderMap::new();
@@ -462,7 +485,7 @@ mod tests {
                 search_fields: None,
                 start_timestamp: None,
                 max_hits: 10,
-                format: Format::default(),
+                format: BodyFormat::default(),
                 sort_by_field: None,
                 aggs: Some(json!({"range":[]})),
                 ..Default::default()
@@ -491,7 +514,7 @@ mod tests {
                 end_timestamp: Some(1450720000),
                 max_hits: 10,
                 start_offset: 22,
-                format: Format::default(),
+                format: BodyFormat::default(),
                 sort_by_field: None,
                 ..Default::default()
             }
@@ -519,7 +542,7 @@ mod tests {
                 end_timestamp: Some(1450720000),
                 max_hits: 20,
                 start_offset: 0,
-                format: Format::default(),
+                format: BodyFormat::default(),
                 sort_by_field: None,
                 ..Default::default()
             }
@@ -543,7 +566,7 @@ mod tests {
                 end_timestamp: None,
                 max_hits: 20,
                 start_offset: 0,
-                format: Format::Json,
+                format: BodyFormat::Json,
                 search_fields: None,
                 sort_by_field: None,
                 ..Default::default()
@@ -567,7 +590,7 @@ mod tests {
                 end_timestamp: None,
                 max_hits: 20,
                 start_offset: 0,
-                format: Format::Json,
+                format: BodyFormat::Json,
                 search_fields: None,
                 sort_by_field: Some(SortByField {
                     field_name: "field".to_string(),
@@ -591,7 +614,7 @@ mod tests {
                 end_timestamp: None,
                 max_hits: 20,
                 start_offset: 0,
-                format: Format::Json,
+                format: BodyFormat::Json,
                 search_fields: None,
                 sort_by_field: Some(SortByField {
                     field_name: "field".to_string(),
@@ -615,7 +638,7 @@ mod tests {
                 end_timestamp: None,
                 max_hits: 20,
                 start_offset: 0,
-                format: Format::Json,
+                format: BodyFormat::Json,
                 search_fields: None,
                 sort_by_field: Some(SortByField {
                     field_name: "field".to_string(),
@@ -635,7 +658,7 @@ mod tests {
         assert_eq!(resp.status(), 400);
         let resp_json: JsonValue = serde_json::from_slice(resp.body())?;
         let exp_resp_json = serde_json::json!({
-            "error": "unknown field `end_unix_timestamp`, expected one of `query`, `aggs`, `search_field`, `snippet_fields`, `start_timestamp`, `end_timestamp`, `max_hits`, `start_offset`, `format`, `sort_by_field`"
+            "message": "unknown field `end_unix_timestamp`, expected one of `query`, `aggs`, `search_field`, `snippet_fields`, `start_timestamp`, `end_timestamp`, `max_hits`, `start_offset`, `format`, `sort_by_field`"
         });
         assert_eq!(resp_json, exp_resp_json);
         Ok(())
@@ -752,14 +775,13 @@ mod tests {
             .expect_root_search()
             .returning(|_| Err(SearchError::InvalidQuery("invalid query".to_string())));
         let rest_search_api_handler = search_handler(mock_search_service);
-        assert_eq!(
-            warp::test::request()
-                .path("/my-index/search?query=myfield:test")
-                .reply(&rest_search_api_handler)
-                .await
-                .status(),
-            400
-        );
+        let response = warp::test::request()
+            .path("/my-index/search?query=myfield:test")
+            .reply(&rest_search_api_handler)
+            .await;
+        assert_eq!(response.status(), 400);
+        let body = String::from_utf8_lossy(response.body());
+        assert!(body.contains("invalid query"));
         Ok(())
     }
 

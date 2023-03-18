@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -52,7 +52,7 @@ pub use scheduler::{start_scheduler, SchedulerClient};
 pub(crate) mod tests;
 mod universe;
 
-pub use actor::{Actor, ActorExitStatus, Handler};
+pub use actor::{Actor, ActorExitStatus, DeferableReplyHandler, Handler};
 pub use actor_handle::{ActorHandle, Health, Healthz, Supervisable};
 pub use command::Command;
 pub use observation::{Observation, ObservationType};
@@ -89,7 +89,7 @@ pub const HEARTBEAT: Duration = if cfg!(any(test, feature = "testsuite")) {
 /// Once this time is elapsed, we just return the last observation.
 const OBSERVE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Error that occured while calling `ActorContext::ask(..)` or `Universe::ask`
+/// Error that occurred while calling `ActorContext::ask(..)` or `Universe::ask`
 #[derive(Error, Debug)]
 pub enum AskError<E: fmt::Debug> {
     #[error("Message could not be delivered")]

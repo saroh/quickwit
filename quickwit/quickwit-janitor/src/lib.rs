@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -22,6 +22,7 @@
 use std::sync::Arc;
 
 use quickwit_actors::{Mailbox, Universe};
+use quickwit_common::FileEntry;
 use quickwit_config::QuickwitConfig;
 use quickwit_metastore::Metastore;
 use quickwit_search::SearchJobPlacer;
@@ -38,7 +39,7 @@ mod retention_policy_execution;
 pub use janitor_service::JanitorService;
 
 pub use self::garbage_collection::{
-    delete_splits_with_files, run_garbage_collect, FileEntry, SplitDeletionError, SplitRemovalInfo,
+    delete_splits_with_files, run_garbage_collect, SplitDeletionError, SplitRemovalInfo,
 };
 use crate::actors::{DeleteTaskService, GarbageCollector, RetentionPolicyExecutor};
 

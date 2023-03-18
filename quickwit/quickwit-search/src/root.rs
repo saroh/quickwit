@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -25,10 +25,10 @@ use itertools::Itertools;
 use quickwit_config::{build_doc_mapper, IndexConfig};
 use quickwit_metastore::{Metastore, SplitMetadata};
 use quickwit_proto::{
-    FetchDocsRequest, FetchDocsResponse, Hit, LeafHit, LeafSearchRequest, LeafSearchResponse,
-    PartialHit, SearchRequest, SearchResponse, SplitIdAndFooterOffsets,
+    FetchDocsRequest, FetchDocsResponse, Hit, LeafHit, LeafListTermsRequest, LeafListTermsResponse,
+    LeafSearchRequest, LeafSearchResponse, ListTermsRequest, ListTermsResponse, PartialHit,
+    SearchRequest, SearchResponse, SplitIdAndFooterOffsets,
 };
-use tantivy::aggregation::agg_req::Aggregations;
 use tantivy::aggregation::agg_result::AggregationResults;
 use tantivy::aggregation::intermediate_agg_result::IntermediateAggregationResults;
 use tantivy::collector::Collector;
@@ -37,7 +37,7 @@ use tokio::task::spawn_blocking;
 use tracing::{debug, error, instrument};
 
 use crate::cluster_client::ClusterClient;
-use crate::collector::make_merge_collector;
+use crate::collector::{make_merge_collector, QuickwitAggregations};
 use crate::search_job_placer::Job;
 use crate::{
     extract_split_and_footer_offsets, list_relevant_splits, SearchError, SearchJobPlacer,
@@ -112,7 +112,7 @@ impl From<FetchDocsJob> for SplitIdAndFooterOffsets {
 
 pub(crate) fn validate_request(search_request: &SearchRequest) -> crate::Result<()> {
     if let Some(agg) = search_request.aggregation_request.as_ref() {
-        let _agg: Aggregations = serde_json::from_str(agg)
+        let _aggs: QuickwitAggregations = serde_json::from_str(agg)
             .map_err(|err| SearchError::InvalidAggregationRequest(err.to_string()))?;
     };
 
@@ -154,7 +154,7 @@ pub async fn root_search(
 
     let doc_mapper = build_doc_mapper(&index_config.doc_mapping, &index_config.search_settings)
         .map_err(|err| {
-            SearchError::InternalError(format!("Failed to build doc mapper. Cause: {}", err))
+            SearchError::InternalError(format!("Failed to build doc mapper. Cause: {err}"))
         })?;
 
     validate_request(search_request)?;
@@ -163,7 +163,7 @@ pub async fn root_search(
     doc_mapper.query(doc_mapper.schema(), search_request)?;
 
     let doc_mapper_str = serde_json::to_string(&doc_mapper).map_err(|err| {
-        SearchError::InternalError(format!("Failed to serialize doc mapper: Cause {}", err))
+        SearchError::InternalError(format!("Failed to serialize doc mapper: Cause {err}"))
     })?;
 
     let split_metadatas: Vec<SplitMetadata> =
@@ -201,6 +201,7 @@ pub async fn root_search(
 
     // Creates a collector which merges responses into one
     let merge_collector = make_merge_collector(search_request)?;
+    let aggregations = merge_collector.aggregation.clone();
 
     // Merging is a cpu-bound task.
     // It should be executed by Tokio's blocking threads.
@@ -212,7 +213,7 @@ pub async fn root_search(
         spawn_blocking(move || merge_collector.merge_fruits(leaf_search_responses))
             .await?
             .map_err(|merge_error: TantivyError| {
-                crate::SearchError::InternalError(format!("{}", merge_error))
+                crate::SearchError::InternalError(format!("{merge_error}"))
             })?;
     debug!(leaf_search_response = ?leaf_search_response, "Merged leaf search response.");
 
@@ -221,7 +222,7 @@ pub async fn root_search(
         let errors: String = leaf_search_response
             .failed_splits
             .iter()
-            .map(|splits| format!("{}", splits))
+            .map(|splits| format!("{splits}"))
             .collect::<Vec<_>>()
             .join(", ");
         return Err(SearchError::InternalError(errors));
@@ -292,11 +293,22 @@ pub async fn root_search(
     let aggregation = if let Some(intermediate_aggregation_result) =
         leaf_search_response.intermediate_aggregation_result
     {
-        let res: IntermediateAggregationResults =
-            serde_json::from_str(&intermediate_aggregation_result)?;
-        let req: Aggregations = serde_json::from_str(search_request.aggregation_request())?;
-        let res: AggregationResults = res.into_final_bucket_result(req, &doc_mapper.schema())?;
-        Some(serde_json::to_string(&res)?)
+        match aggregations.expect(
+            "Aggregation should be present since we are processing an intermediate aggregation \
+             result.",
+        ) {
+            QuickwitAggregations::FindTraceIdsAggregation(_) => {
+                // The merge collector has already merged the intermediate results.
+                Some(intermediate_aggregation_result)
+            }
+            QuickwitAggregations::TantivyAggregations(aggregations) => {
+                let res: IntermediateAggregationResults =
+                    serde_json::from_str(&intermediate_aggregation_result)?;
+                let res: AggregationResults =
+                    res.into_final_bucket_result(aggregations, &doc_mapper.schema())?;
+                Some(serde_json::to_string(&res)?)
+            }
+        }
     } else {
         None
     };
@@ -305,6 +317,125 @@ pub async fn root_search(
         aggregation,
         num_hits: leaf_search_response.num_hits,
         hits,
+        elapsed_time_micros: elapsed.as_micros() as u64,
+        errors: vec![],
+    })
+}
+
+/// Performs a distributed list terms.
+/// 1. Sends leaf request over gRPC to multiple leaf nodes.
+/// 2. Merges the search results.
+/// 3. Builds the response and returns.
+/// this is much simpler than `root_search` as it doesn't need to get actual docs.
+#[instrument(skip(list_terms_request, cluster_client, search_job_placer, metastore))]
+pub async fn root_list_terms(
+    list_terms_request: &ListTermsRequest,
+    metastore: &dyn Metastore,
+    cluster_client: &ClusterClient,
+    search_job_placer: &SearchJobPlacer,
+) -> crate::Result<ListTermsResponse> {
+    let start_instant = tokio::time::Instant::now();
+
+    let index_config: IndexConfig = metastore
+        .index_metadata(&list_terms_request.index_id)
+        .await?
+        .into_index_config();
+
+    let doc_mapper = build_doc_mapper(&index_config.doc_mapping, &index_config.search_settings)
+        .map_err(|err| {
+            SearchError::InternalError(format!("Failed to build doc mapper. Cause: {err}"))
+        })?;
+
+    let schema = doc_mapper.schema();
+    let field = schema.get_field(&list_terms_request.field).map_err(|_| {
+        SearchError::InvalidQuery(format!(
+            "Failed to list terms in `{}`, field doesn't exist",
+            list_terms_request.field
+        ))
+    })?;
+
+    let field_entry = schema.get_field_entry(field);
+    if !field_entry.is_indexed() {
+        return Err(SearchError::InvalidQuery(
+            "Trying to list terms on field which isn't indexed".to_string(),
+        ));
+    }
+
+    let mut query = quickwit_metastore::ListSplitsQuery::for_index(&list_terms_request.index_id)
+        .with_split_state(quickwit_metastore::SplitState::Published);
+
+    if let Some(start_ts) = list_terms_request.start_timestamp {
+        query = query.with_time_range_start_gte(start_ts);
+    }
+
+    if let Some(end_ts) = list_terms_request.end_timestamp {
+        query = query.with_time_range_end_lt(end_ts);
+    }
+
+    let split_metadatas = metastore
+        .list_splits(query)
+        .await?
+        .into_iter()
+        .map(|metadata| metadata.split_metadata)
+        .collect::<Vec<_>>();
+
+    let index_uri = &index_config.index_uri;
+
+    let jobs: Vec<SearchJob> = split_metadatas.iter().map(SearchJob::from).collect();
+    let assigned_leaf_search_jobs = search_job_placer.assign_jobs(jobs, &HashSet::default())?;
+    debug!(assigned_leaf_search_jobs=?assigned_leaf_search_jobs, "Assigned leaf search jobs.");
+    let leaf_search_responses: Vec<LeafListTermsResponse> = try_join_all(
+        assigned_leaf_search_jobs
+            .into_iter()
+            .map(|(client, client_jobs)| {
+                cluster_client.leaf_list_terms(
+                    LeafListTermsRequest {
+                        list_terms_request: Some(list_terms_request.clone()),
+                        split_offsets: client_jobs.into_iter().map(|job| job.offsets).collect(),
+                        index_uri: index_uri.to_string(),
+                    },
+                    client,
+                )
+            }),
+    )
+    .await?;
+
+    let failed_splits: Vec<_> = leaf_search_responses
+        .iter()
+        .flat_map(|leaf_search_response| &leaf_search_response.failed_splits)
+        .collect();
+
+    if !failed_splits.is_empty() {
+        error!(failed_splits = ?failed_splits, "Leaf search response contains at least one failed split.");
+        let errors: String = failed_splits
+            .iter()
+            .map(|splits| splits.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(SearchError::InternalError(errors));
+    }
+
+    // Merging is a cpu-bound task, but probably fast enough to not require
+    // spawning it on a blocking thread.
+
+    let merged_iter = leaf_search_responses
+        .into_iter()
+        .map(|leaf_search_response| leaf_search_response.terms)
+        .kmerge()
+        .dedup();
+    let leaf_list_terms_response: Vec<Vec<u8>> = if let Some(limit) = list_terms_request.max_hits {
+        merged_iter.take(limit as usize).collect()
+    } else {
+        merged_iter.collect()
+    };
+
+    debug!(leaf_list_terms_response = ?leaf_list_terms_response, "Merged leaf search response.");
+
+    let elapsed = start_instant.elapsed();
+
+    Ok(ListTermsResponse {
+        num_hits: leaf_list_terms_response.len() as u64,
+        terms: leaf_list_terms_response,
         elapsed_time_micros: elapsed.as_micros() as u64,
         errors: vec![],
     })
@@ -718,7 +849,7 @@ mod tests {
                         ..Default::default()
                     })
                 } else {
-                    panic!("unexpected request in test {:?}", split_ids);
+                    panic!("unexpected request in test {split_ids:?}");
                 }
             });
         mock_search_service1.expect_fetch_docs().returning(
@@ -1354,7 +1485,7 @@ mod tests {
         assert_eq!(
             search_response.unwrap_err().to_string(),
             "Invalid aggregation request: data did not match any variant of untagged enum \
-             Aggregation at line 18 column 13",
+             QuickwitAggregations",
         );
         Ok(())
     }

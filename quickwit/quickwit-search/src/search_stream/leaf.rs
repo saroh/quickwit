@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -38,7 +38,7 @@ use tracing::*;
 
 use super::collector::{PartionnedFastFieldCollector, PartitionValues};
 use super::FastFieldCollector;
-use crate::filters::TimestampFilterBuilder;
+use crate::filters::{create_timestamp_filter_builder, TimestampFilterBuilder};
 use crate::leaf::{open_index_with_caches, warmup};
 use crate::service::SearcherContext;
 use crate::{Result, SearchError};
@@ -47,7 +47,7 @@ use crate::{Result, SearchError};
 // Note: we return a stream of a result with a tonic::Status error
 // to be compatible with the stream coming from the grpc client.
 // It would be better to have a SearchError but we need then
-// to process stream in grpc_adapater.rs to change SearchError
+// to process stream in grpc_adapter.rs to change SearchError
 // to tonic::Status as tonic::Status is required by the stream result
 // signature defined by proto generated code.
 pub async fn leaf_search_stream(
@@ -149,17 +149,14 @@ async fn leaf_search_stream_single_split(
         .try_into()?;
     let searcher = reader.searcher();
 
-    let timestamp_filter_builder_opt: Option<TimestampFilterBuilder> = TimestampFilterBuilder::new(
-        request_fields
-            .timestamp_field_name()
-            .map(ToString::to_string),
-        request_fields.timestamp_field,
-        search_request.start_timestamp,
-        search_request.end_timestamp,
-    );
+    let timestamp_filter_builder_opt: Option<TimestampFilterBuilder> =
+        create_timestamp_filter_builder(
+            request_fields.timestamp_field_name(),
+            search_request.start_timestamp,
+            search_request.end_timestamp,
+        );
 
-    let requires_scoring =
-        matches!(&search_request.sort_by_field, Some(field_name) if field_name == "_score");
+    let requires_scoring = search_request.sort_by_field.as_deref() == Some("_score");
 
     // TODO no test fail if this line get removed
     warmup_info.field_norms |= requires_scoring;
@@ -256,15 +253,14 @@ async fn leaf_search_stream_single_split(
             }
             (fast_field_type, None) => {
                 return Err(SearchError::InternalError(format!(
-                    "Search stream does not support fast field of type `{:?}`.",
-                    fast_field_type
+                    "Search stream does not support fast field of type `{fast_field_type:?}`."
                 )));
             }
             (fast_field_type, Some(partition_fast_field_type)) => {
                 return Err(SearchError::InternalError(format!(
-                    "Search stream does not support the combination of fast field type `{:?}` and \
-                     partition fast field type `{:?}`.",
-                    fast_field_type, partition_fast_field_type
+                    "Search stream does not support the combination of fast field type \
+                     `{fast_field_type:?}` and partition fast field type \
+                     `{partition_fast_field_type:?}`."
                 )));
             }
         };
@@ -319,7 +315,7 @@ fn collect_partitioned_values<TFastValue: FastValue, TPartitionValue: FastValue 
 struct SearchStreamRequestFields {
     fast_field: Field,
     partition_by_fast_field: Option<Field>,
-    timestamp_field: Option<Field>,
+    timestamp_field_name: Option<String>,
     schema: Schema,
 }
 
@@ -345,14 +341,7 @@ impl<'a> SearchStreamRequestFields {
         schema: &'a Schema,
         doc_mapper: &dyn DocMapper,
     ) -> crate::Result<SearchStreamRequestFields> {
-        let fast_field = schema
-            .get_field(&stream_request.fast_field)
-            .ok_or_else(|| {
-                SearchError::InvalidQuery(format!(
-                    "Field `{}` does not exist in schema",
-                    &stream_request.fast_field
-                ))
-            })?;
+        let fast_field = schema.get_field(&stream_request.fast_field)?;
 
         if !Self::is_fast_field(schema, &fast_field) {
             return Err(SearchError::InvalidQuery(format!(
@@ -361,11 +350,11 @@ impl<'a> SearchStreamRequestFields {
             )));
         }
 
-        let timestamp_field = doc_mapper.timestamp_field(schema);
+        let timestamp_field_name = doc_mapper.timestamp_field_name().map(ToString::to_string);
         let partition_by_fast_field = stream_request
             .partition_by_field
             .as_deref()
-            .and_then(|field_name| schema.get_field(field_name));
+            .and_then(|field_name| schema.get_field(field_name).ok());
 
         if partition_by_fast_field.is_some()
             && !Self::is_fast_field(schema, &partition_by_fast_field.unwrap())
@@ -380,7 +369,7 @@ impl<'a> SearchStreamRequestFields {
             schema: schema.to_owned(),
             fast_field,
             partition_by_fast_field,
-            timestamp_field,
+            timestamp_field_name,
         })
     }
 
@@ -411,8 +400,7 @@ impl<'a> SearchStreamRequestFields {
     }
 
     pub fn timestamp_field_name(&self) -> Option<&str> {
-        self.timestamp_field
-            .map(|field| self.schema.get_field_name(field))
+        self.timestamp_field_name.as_deref()
     }
 
     pub fn fast_field_name(&self) -> &str {
@@ -463,7 +451,7 @@ mod tests {
         let end_timestamp = start_timestamp + 20;
         for i in 0..30 {
             let timestamp = start_timestamp + (i + 1) as i64;
-            let body = format!("info @ t:{}", timestamp);
+            let body = format!("info @ t:{timestamp}");
             docs.push(json!({"body": body, "ts": timestamp}));
             if timestamp < end_timestamp {
                 filtered_timestamp_values.push(timestamp);
@@ -511,6 +499,7 @@ mod tests {
                     .join("\n")
             )
         );
+        test_sandbox.assert_quit().await;
         Ok(())
     }
 
@@ -530,7 +519,7 @@ mod tests {
         "#;
         let test_sandbox = TestSandbox::create(index_id, doc_mapping_yaml, "", &["body"]).await?;
         let mut docs = vec![];
-        let mut filtered_timestamp_values = vec![];
+        let mut filtered_timestamp_values = Vec::new();
         let start_date = OffsetDateTime::now_utc();
         let num_days = 20;
         for i in 0..30 {
@@ -538,8 +527,8 @@ mod tests {
             let body = format!("info @ t:{}", i + 1);
             docs.push(json!({"body": body, "ts": dt.unix_timestamp()}));
             if i + 1 < num_days {
-                let ts_micros = dt.unix_timestamp() * 1_000_000;
-                filtered_timestamp_values.push(ts_micros.to_string());
+                let ts_secs = dt.unix_timestamp() * 1_000_000;
+                filtered_timestamp_values.push(ts_secs.to_string());
             }
         }
         test_sandbox.add_documents(docs).await?;
@@ -582,6 +571,7 @@ mod tests {
             from_utf8(&res.data)?,
             format!("{}\n", filtered_timestamp_values.join("\n"))
         );
+        test_sandbox.assert_quit().await;
         Ok(())
     }
 
@@ -639,6 +629,7 @@ mod tests {
             .unwrap()
             .to_string()
             .contains("Search stream does not support fast field of type `Str`"),);
+        test_sandbox.assert_quit().await;
         Ok(())
     }
 
@@ -670,7 +661,7 @@ mod tests {
         let end_timestamp: i64 = start_timestamp + 20;
         for i in 0..30 {
             let timestamp = start_timestamp + (i + 1) as i64;
-            let body = format!("info @ t:{}", timestamp);
+            let body = format!("info @ t:{timestamp}");
             let partition_number = partition_by_fast_field_values[i % 5];
             let fast_field: u64 = (i * 2).try_into().unwrap();
             docs.push(json!({
@@ -730,6 +721,7 @@ mod tests {
         expected_output.sort_by(|l, r| l.partition_value.cmp(&r.partition_value));
         deserialized_output.sort_by(|l, r| l.partition_value.cmp(&r.partition_value));
         assert_eq!(expected_output, deserialized_output);
+        test_sandbox.assert_quit().await;
         Ok(())
     }
 

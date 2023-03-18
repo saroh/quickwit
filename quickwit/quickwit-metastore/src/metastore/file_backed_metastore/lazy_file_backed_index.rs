@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -29,7 +29,7 @@ use super::store_operations::fetch_index;
 use crate::MetastoreResult;
 
 /// Lazy [`FileBackedIndex`]. It loads a `FileBackedIndex`
-/// on demand and optionaly spawns a task to poll
+/// on demand and optionally spawns a task to poll
 /// regularly the storage and update the index.
 pub(crate) struct LazyFileBackedIndex {
     index_id: String,

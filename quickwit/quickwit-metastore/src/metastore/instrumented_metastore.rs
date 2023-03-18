@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -292,4 +292,28 @@ impl Metastore for InstrumentedMetastore {
             [list_stale_splits, index_id]
         );
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use quickwit_storage::RamStorage;
+
+    use super::*;
+    use crate::tests::test_suite::DefaultForTest;
+    use crate::FileBackedMetastore;
+
+    #[async_trait]
+    impl DefaultForTest for InstrumentedMetastore {
+        async fn default_for_test() -> Self {
+            InstrumentedMetastore {
+                underlying: Box::new(FileBackedMetastore::for_test(Arc::new(
+                    RamStorage::default(),
+                ))),
+            }
+        }
+    }
+
+    metastore_test_suite!(crate::metastore::instrumented_metastore::InstrumentedMetastore);
 }

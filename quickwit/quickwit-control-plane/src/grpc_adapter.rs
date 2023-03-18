@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -120,7 +120,7 @@ mod tests {
             HashSet::from([QuickwitService::ControlPlane]),
             control_plane_grpc_addr,
             control_plane_grpc_addr,
-            None,
+            Vec::new(),
         );
         let (_members_tx, members_rx) =
             watch::channel::<Vec<ClusterMember>>(vec![control_plane_service_member.clone()]);
@@ -132,7 +132,8 @@ mod tests {
         let result = control_plane_client.notify_index_change().await;
         assert!(result.is_ok());
         let scheduler_state = scheduler_handler.process_pending_and_observe().await;
-        assert_eq!(scheduler_state.num_applied_physical_indexing_plan, 2);
+        assert_eq!(scheduler_state.num_applied_physical_indexing_plan, 1);
+        universe.assert_quit().await;
 
         Ok(())
     }

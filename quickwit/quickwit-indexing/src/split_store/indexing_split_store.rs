@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -191,7 +191,7 @@ impl IndexingSplitStore {
     /// # Implementation detail:
     ///
     /// Depending on whether the split was obtained from the `Storage`
-    /// or the cache, it could consist in a direclty or a proper split file.
+    /// or the cache, it could consist in a directly or a proper split file.
     /// This method takes care of the dealing with opening the split correctly.
     ///
     /// As we fetch the split, we optimistically assume that this is for a merge

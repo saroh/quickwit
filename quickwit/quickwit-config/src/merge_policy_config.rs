@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -71,6 +71,7 @@ pub struct StableLogMergePolicyConfig {
     /// becomes mature.
     /// If `now() >= split.created_timestamp + maturation_period` then
     /// the split is mature.
+    #[schema(value_type = String)]
     #[serde(default = "default_maturation_period")]
     #[serde(deserialize_with = "parse_human_duration")]
     #[serde(serialize_with = "serialize_duration")]

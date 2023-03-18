@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -169,7 +169,7 @@ impl InnerRoutingExpr {
 
 // We don't rely on Derive here to make it easier to keep the
 // implementation stable.
-#[allow(clippy::derive_hash_xor_eq)]
+#[allow(clippy::derived_hash_with_manual_eq)]
 impl Hash for InnerRoutingExpr {
     fn hash<H: Hasher>(&self, hasher: &mut H) {
         match self {
@@ -263,7 +263,7 @@ impl Display for InnerRoutingExpr {
                 }
             }
             InnerRoutingExpr::Modulo(inner_expr, modulo) => {
-                write!(f, "hash_mod(({}), {})", inner_expr, modulo)?;
+                write!(f, "hash_mod(({inner_expr}), {modulo})")?;
             }
         }
         Ok(())

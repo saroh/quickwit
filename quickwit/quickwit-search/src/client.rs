@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -20,6 +20,7 @@
 use std::fmt;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::{StreamExt, TryStreamExt};
@@ -219,6 +220,24 @@ impl SearchServiceClient {
             SearchServiceClientImpl::Local(service) => service.fetch_docs(request).await,
         }
     }
+
+    /// Perform leaf list terms.
+    pub async fn leaf_list_terms(
+        &mut self,
+        request: quickwit_proto::LeafListTermsRequest,
+    ) -> crate::Result<quickwit_proto::LeafListTermsResponse> {
+        match &mut self.client_impl {
+            SearchServiceClientImpl::Grpc(grpc_client) => {
+                let tonic_request = Request::new(request);
+                let tonic_response = grpc_client
+                    .leaf_list_terms(tonic_request)
+                    .await
+                    .map_err(|tonic_error| parse_grpc_error(&tonic_error))?;
+                Ok(tonic_response.into_inner())
+            }
+            SearchServiceClientImpl::Local(service) => service.leaf_list_terms(request).await,
+        }
+    }
 }
 
 /// Creates a [`SearchServiceClient`] with SocketAddr as an argument.
@@ -232,7 +251,9 @@ pub async fn create_search_service_client(
         .path_and_query("/")
         .build()?;
     // Create a channel with connect_lazy to automatically reconnect to the node.
-    let channel = Endpoint::from(uri).connect_lazy();
+    let channel = Endpoint::from(uri)
+        .connect_timeout(Duration::from_secs(5))
+        .connect_lazy();
     let client = quickwit_proto::search_service_client::SearchServiceClient::with_interceptor(
         channel,
         SpanContextInterceptor,

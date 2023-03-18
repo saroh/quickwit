@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -21,7 +21,11 @@
 
 mod errors;
 mod ingest_api_service;
+#[path = "codegen/ingest_service.rs"]
+mod ingest_service;
+mod memory_capacity;
 mod metrics;
+mod notifications;
 mod position;
 mod queue;
 
@@ -29,19 +33,24 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
-pub use errors::IngestApiError;
-use errors::Result;
-pub use ingest_api_service::{GetPartitionId, IngestApiService};
-use metrics::INGEST_METRICS;
+pub use errors::IngestServiceError;
+pub use ingest_api_service::{GetMemoryCapacity, GetPartitionId, IngestApiService};
+pub use ingest_service::*;
+pub use memory_capacity::MemoryCapacity;
 use once_cell::sync::OnceCell;
 pub use position::Position;
 pub use queue::Queues;
 use quickwit_actors::{Mailbox, Universe};
 use quickwit_config::IngestApiConfig;
-use quickwit_proto::ingest_api::DocBatch;
+use serde::Deserialize;
 use tokio::sync::Mutex;
 
+mod doc_batch;
+pub use doc_batch::*;
+
 pub const QUEUES_DIR_NAME: &str = "queues";
+
+pub type Result<T> = std::result::Result<T, IngestServiceError>;
 
 type IngestApiServiceMailboxes = HashMap<PathBuf, Mailbox<IngestApiService>>;
 
@@ -63,8 +72,8 @@ pub async fn init_ingest_api(
     }
     let ingest_api_actor = IngestApiService::with_queues_dir(
         queues_dir_path,
-        config.max_queue_memory_usage,
-        config.max_queue_disk_usage,
+        config.max_queue_memory_usage.get_bytes() as usize,
+        config.max_queue_disk_usage.get_bytes() as usize,
     )
     .await
     .with_context(|| {
@@ -105,37 +114,36 @@ pub async fn start_ingest_api_service(
     init_ingest_api(universe, &queues_dir_path, config).await
 }
 
-/// Adds a document raw bytes to a [`DocBatch`]
-pub fn add_doc(payload: &[u8], fetch_resp: &mut DocBatch) -> usize {
-    fetch_resp.concat_docs.extend_from_slice(payload);
-    fetch_resp.doc_lens.push(payload.len() as u64);
-    INGEST_METRICS
-        .ingested_num_bytes
-        .inc_by(payload.len() as u64);
-    payload.len()
+#[repr(u32)]
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[serde(rename_all(deserialize = "snake_case"))]
+#[derive(Default)]
+pub enum CommitType {
+    #[default]
+    Auto = 0,
+    WaitFor = 1,
+    Force = 2,
 }
 
-/// Returns an iterator over the document payloads within a doc_batch.
-pub fn iter_doc_payloads(doc_batch: &DocBatch) -> impl Iterator<Item = &[u8]> {
-    doc_batch
-        .doc_lens
-        .iter()
-        .cloned()
-        .scan(0, |current_offset, doc_num_bytes| {
-            let start = *current_offset;
-            let end = start + doc_num_bytes as usize;
-            *current_offset = end;
-            Some(&doc_batch.concat_docs[start..end])
-        })
+impl From<u32> for CommitType {
+    fn from(value: u32) -> Self {
+        match value {
+            0 => CommitType::Auto,
+            1 => CommitType::WaitFor,
+            2 => CommitType::Force,
+            _ => panic!("Unknown commit type {value}"),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
 
+    use byte_unit::Byte;
     use quickwit_actors::AskError;
-    use quickwit_proto::ingest_api::{CreateQueueRequest, IngestRequest, SuggestTruncateRequest};
 
     use super::*;
+    use crate::{CreateQueueRequest, IngestRequest, SuggestTruncateRequest};
 
     #[tokio::test]
     async fn test_get_ingest_api_service() {
@@ -168,6 +176,49 @@ mod tests {
             })
             .await
             .unwrap();
+        universe.assert_quit().await;
+    }
+
+    #[tokio::test]
+    async fn test_get_ingest_multiple_index_api_service() {
+        let universe = Universe::with_accelerated_time();
+        let tempdir = tempfile::tempdir().unwrap();
+
+        let queues_0_dir_path = tempdir.path().join("queues-0");
+        let ingest_api_service =
+            init_ingest_api(&universe, &queues_0_dir_path, &IngestApiConfig::default())
+                .await
+                .unwrap();
+        ingest_api_service
+            .ask_for_res(CreateQueueRequest {
+                queue_id: "index-1".to_string(),
+            })
+            .await
+            .unwrap();
+        let ingest_request = IngestRequest {
+            doc_batches: vec![
+                DocBatch {
+                    index_id: "index-1".to_string(),
+                    concat_docs: vec![10, 11, 12].into(),
+                    doc_lens: vec![2],
+                },
+                DocBatch {
+                    index_id: "index-2".to_string(),
+                    concat_docs: vec![10, 11, 12].into(),
+                    doc_lens: vec![2],
+                },
+            ],
+            commit: CommitType::Auto as u32,
+        };
+        let ingest_result = ingest_api_service.ask_for_res(ingest_request).await;
+        assert!(ingest_result.is_err());
+        match ingest_result.unwrap_err() {
+            AskError::ErrorReply(ingest_error) => {
+                assert!(ingest_error.to_string().contains("index-2"));
+            }
+            _ => panic!("wrong error type"),
+        }
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -181,8 +232,8 @@ mod tests {
             &universe,
             &queues_dir_path,
             &IngestApiConfig {
-                max_queue_memory_usage: 1024,
-                max_queue_disk_usage: 1024 * 1024 * 256,
+                max_queue_memory_usage: Byte::from_bytes(1200),
+                max_queue_disk_usage: Byte::from_bytes(1024 * 1024 * 256),
             },
         )
         .await
@@ -199,9 +250,10 @@ mod tests {
         let ingest_request = IngestRequest {
             doc_batches: vec![DocBatch {
                 index_id: "test-queue".to_string(),
-                concat_docs: vec![1; 600],
+                concat_docs: vec![1; 600].into(),
                 doc_lens: vec![30; 20],
             }],
+            commit: CommitType::Auto as u32,
         };
 
         ingest_api_service
@@ -220,7 +272,7 @@ mod tests {
                 .ask_for_res(ingest_request.clone())
                 .await
                 .unwrap_err(),
-            AskError::ErrorReply(IngestApiError::RateLimited)
+            AskError::ErrorReply(IngestServiceError::RateLimited)
         ));
 
         // delete the first batch
@@ -237,5 +289,6 @@ mod tests {
             .ask_for_res(ingest_request)
             .await
             .unwrap();
+        universe.assert_quit().await;
     }
 }

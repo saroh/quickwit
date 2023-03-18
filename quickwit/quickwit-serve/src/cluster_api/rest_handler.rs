@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -21,19 +21,9 @@ use std::convert::Infallible;
 use std::sync::Arc;
 
 use quickwit_cluster::{Cluster, ClusterSnapshot, NodeIdSchema};
-use serde::Deserialize;
 use warp::{Filter, Rejection};
 
-use crate::Format;
-
-/// Cluster handler.
-pub fn cluster_handler(
-    cluster: Arc<Cluster>,
-) -> impl Filter<Extract = (impl warp::Reply,), Error = Rejection> + Clone {
-    cluster_state_filter()
-        .and(warp::path::end().map(move || cluster.clone()))
-        .then(get_cluster)
-}
+use crate::format::{extract_format_from_qs, make_response};
 
 #[derive(utoipa::OpenApi)]
 #[openapi(
@@ -42,43 +32,30 @@ pub fn cluster_handler(
 )]
 pub struct ClusterApi;
 
-/// This struct represents the QueryString passed to
-/// the rest API.
-#[derive(Deserialize, Debug, Eq, PartialEq, utoipa::IntoParams)]
-#[into_params(parameter_in = Query)]
-#[serde(deny_unknown_fields)]
-struct ClusterStateQueryString {
-    /// The output format requested.
-    #[serde(default)]
-    pub format: Format,
-}
-
-fn cluster_state_filter(
-) -> impl Filter<Extract = (ClusterStateQueryString,), Error = Rejection> + Clone {
+/// Cluster handler.
+pub fn cluster_handler(
+    cluster: Arc<Cluster>,
+) -> impl Filter<Extract = (impl warp::Reply,), Error = Rejection> + Clone {
     warp::path!("cluster")
         .and(warp::path::end())
         .and(warp::get())
-        .and(serde_qs::warp::query(serde_qs::Config::default()))
+        .and(warp::path::end().map(move || cluster.clone()))
+        .then(get_cluster)
+        .and(extract_format_from_qs())
+        .map(make_response)
 }
 
 #[utoipa::path(
     get,
     tag = "Cluster Info",
     path = "/cluster",
-    params(ClusterStateQueryString),
     responses(
         (status = 200, description = "Successfully fetched cluster information.", body = ClusterSnapshot)
     )
 )]
-/// Get Cluster
-///
-/// Get cluster information based on a provided filter.
-async fn get_cluster(request: ClusterStateQueryString, cluster: Arc<Cluster>) -> impl warp::Reply {
-    request
-        .format
-        .make_rest_reply_non_serializable_error(cluster_endpoint(cluster).await)
-}
 
-async fn cluster_endpoint(cluster: Arc<Cluster>) -> Result<ClusterSnapshot, Infallible> {
-    Ok(cluster.snapshot().await)
+/// Get cluster information.
+async fn get_cluster(cluster: Arc<Cluster>) -> Result<ClusterSnapshot, Infallible> {
+    let snapshot = cluster.snapshot().await;
+    Ok(snapshot)
 }

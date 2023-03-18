@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -24,7 +24,7 @@ use tracing::{debug, error, info};
 
 use crate::envelope::Envelope;
 use crate::mailbox::{create_mailbox, Inbox};
-use crate::registry::ActorRegistry;
+use crate::registry::{ActorJoinHandle, ActorRegistry};
 use crate::scheduler::{NoAdvanceTimeGuard, SchedulerClient};
 use crate::supervisor::Supervisor;
 use crate::{
@@ -161,11 +161,11 @@ impl<A: Actor> SpawnBuilder<A> {
         let (ctx, inbox, state_rx) = self.create_actor_context_and_inbox(&actor);
         debug!(actor_id = %ctx.actor_instance_id(), "spawn-actor");
         let mailbox = ctx.mailbox().clone();
-        ctx.registry().register(&mailbox);
         let ctx_clone = ctx.clone();
         let loop_async_actor_future =
             async move { actor_loop(actor, inbox, no_advance_time_guard, ctx).await };
-        let join_handle = runtime_handle.spawn(loop_async_actor_future);
+        let join_handle = ActorJoinHandle::new(runtime_handle.spawn(loop_async_actor_future));
+        ctx_clone.registry().register(&mailbox, join_handle.clone());
         let actor_handle = ActorHandle::new(state_rx, join_handle, ctx_clone);
         (mailbox, actor_handle)
     }
@@ -283,7 +283,6 @@ impl<A: Actor> ActorExecutionEnv<A> {
         }
         self.actor.on_drained_messages(&self.ctx).await?;
         self.ctx.idle();
-
         if self.ctx.mailbox().is_last_mailbox() {
             // No one will be able to send us more messages.
             // We can exit the actor.

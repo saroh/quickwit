@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -34,7 +34,7 @@ use crate::checkpoint::{
 use crate::{MetastoreError, MetastoreResult};
 
 /// An index metadata carries all meta data about an index.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(into = "VersionedIndexMetadata")]
 #[serde(try_from = "VersionedIndexMetadata")]
 pub struct IndexMetadata {
@@ -131,7 +131,8 @@ impl TestableForRegression for IndexMetadata {
             PartitionId::from(0i64),
             Position::Beginning,
             Position::from(42u64),
-        );
+        )
+        .unwrap();
         source_checkpoint.try_apply_delta(delta).unwrap();
         let mut per_source_checkpoint: BTreeMap<String, SourceCheckpoint> = BTreeMap::default();
         per_source_checkpoint.insert("kafka-source".to_string(), source_checkpoint);

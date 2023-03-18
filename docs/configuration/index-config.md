@@ -20,7 +20,7 @@ The index configuration format is YAML. When a key is absent from the configurat
 Here is a complete example suited for the HDFS logs dataset:
 
 ```yaml
-version: 0.4 # File format version.
+version: 0.5 # File format version.
 
 index_id: "hdfs"
 
@@ -87,14 +87,14 @@ The doc mapping defines how a document and the fields it contains are stored and
 
 | Variable      | Description   | Default value |
 | ------------- | ------------- | ------------- |
-| `field_mappings` | Collection of field mapping, each having its own data type (text, binary, datetime, bool, i64, u64, f64).   | [] |
+| `field_mappings` | Collection of field mapping, each having its own data type (text, binary, datetime, bool, i64, u64, f64).   | `[]` |
 | `mode`        | Defines how quickwit should handle document fields that are not present in the `field_mappings`. In particular, the "dynamic" mode makes it possible to use quickwit in a schemaless manner. (See [mode](#mode)) | `lenient`
 | `dynamic_mapping` | This parameter is only allowed when `mode` is set to `dynamic`. It then defines whether dynamically mapped fields should be indexed, stored, etc.  | (See [mode](#mode))
-| `tag_fields` | Collection of fields already defined in `field_mappings` whose values will be stored as part of the `tags` metadata. [Learn more about tags](../concepts/querying.md#tag-pruning). | [] |
-| `store_source` | Whether or not the original JSON document is stored or not in the index.   | false |
-| `timestamp_field`      | Timestamp field used for sharding documents in splits. The field has to be of type `datetime`. [Learn more about time sharding](./../concepts/architecture.md).  | None |
- `partition_key`   |  If set, quickwit will route documents into different splits depending on the field name declared as the `partition_key`. | null |
-| `max_num_partitions`  | Limits the number of splits created through partitioning. (See [Partitioning](../concepts/querying.md#partitioning))  |    200 |
+| `tag_fields` | Collection of fields already defined in `field_mappings` whose values will be stored as part of the `tags` metadata. [Learn more about tags](../overview/concepts/querying.md#tag-pruning). | `[]` |
+| `store_source` | Whether or not the original JSON document is stored or not in the index.   | `false` |
+| `timestamp_field`      | Timestamp field used for sharding documents in splits. The field has to be of type `datetime`. [Learn more about time sharding](./../overview/architecture.md).  | `None` |
+ `partition_key`   |  If set, quickwit will route documents into different splits depending on the field name declared as the `partition_key`. | `null` |
+| `max_num_partitions`  | Limits the number of splits created through partitioning. (See [Partitioning](../overview/concepts/querying.md#partitioning))  |    `200` |
 
 ### Field types
 
@@ -399,7 +399,7 @@ targeting the path required to reach them from the root of the json object.
 For instance, in a entirely schemaless settings, a minimal index configuration could be:
 
 ```yaml
-version: 0.4
+version: 0.5
 index_id: my-dynamic-index
 # note we did not map anything.
 doc_mapping:
@@ -464,10 +464,10 @@ This section describes indexing settings for a given index.
 
 | Variable      | Description   | Default value |
 | ------------- | ------------- | ------------- |
-| `commit_timeout_secs`      | Maximum number of seconds before committing a split since its creation.   | 60 |
-| `split_num_docs_target` | Target number of docs per split.   | 10_000_000 |
+| `commit_timeout_secs`      | Maximum number of seconds before committing a split since its creation.   | `60` |
+| `split_num_docs_target` | Target number of docs per split.   | `10_000_000` |
 | `merge_policy` | Describes the strategy used to trigger split merge operations (see [Merge policies](#merge-policies) section below). |
-| `resources.heap_size`      | Indexer heap size per source per index.   | 2_000_000_000 |
+| `resources.heap_size`      | Indexer heap size per source per index.   | `2_000_000_000` |
 
 ### Merge policies
 
@@ -484,7 +484,7 @@ Quickwit's default merge policy is the `stable_log` merge policy
 with the following parameters:
 
 ```yaml
-version: 0.4
+version: 0.5
 index_id: "hdfs"
 # ...
 indexing_settings:
@@ -498,9 +498,9 @@ indexing_settings:
 
 | Variable      | Description   | Default value |
 | ------------- | ------------- | ------------- |
-| `merge_factor`      | *(advanced)* Number of splits to merge together in a single merge operation.   | 10 |
-| `max_merge_factor` | *(advanced)* Maximum number of splits that can be merged together in a single merge operation.  | 12 |
-| `min_level_num_docs` |  *(advanced)* Number of docs below which all splits are considered as belonging to the same level.   | 100_000 |
+| `merge_factor`      | *(advanced)* Number of splits to merge together in a single merge operation.   | `10` |
+| `max_merge_factor` | *(advanced)* Maximum number of splits that can be merged together in a single merge operation.  | `12` |
+| `min_level_num_docs` |  *(advanced)* Number of docs below which all splits are considered as belonging to the same level.   | `100_000` |
 
 
 #### "Limit Merge" merge policy
@@ -512,7 +512,7 @@ of the number of merge operation a split should undergo.
 
 
 ```yaml
-version: 0.4
+version: 0.5
 index_id: "hdfs"
 # ...
 indexing_settings:
@@ -527,9 +527,9 @@ indexing_settings:
 
 | Variable      | Description   | Default value |
 | ------------- | ------------- | ------------- |
-| `max_merge_ops`   |  Maximum number of merges that a given split should undergo. | 4 |
-| `merge_factor`      | *(advanced)* Number of splits to merge together in a single merge operation.   | 10 |
-| `max_merge_factor` | *(advanced)* Maximum number of splits that can be merged together in a single merge operation.  | 12 |
+| `max_merge_ops`   |  Maximum number of merges that a given split should undergo. | `4` |
+| `merge_factor`      | *(advanced)* Number of splits to merge together in a single merge operation.   | `10` |
+| `max_merge_factor` | *(advanced)* Maximum number of splits that can be merged together in a single merge operation.  | `12` |
 
 #### No merge
 
@@ -540,7 +540,7 @@ This setting is not recommended. Merges are necessary to reduce the number of sp
 :::
 
 ```yaml
-version: 0.4
+version: 0.5
 index_id: "hdfs"
 indexing_settings:
     merge_policy:
@@ -560,14 +560,14 @@ This section describes search settings for a given index.
 
 | Variable      | Description   | Default value |
 | ------------- | ------------- | ------------- |
-| `search_default_fields`      | Default list of fields that will be used for search.   | None |
+| `search_default_fields`      | Default list of fields that will be used for search.   | `None` |
 
 ## Retention policy
 
 This section describes how Quickwit manages data retention. In Quickwit, the retention policy manager drops data on a split basis as opposed to individually dropping documents. Splits are evaluated based on their `time_range` which is derived from the index timestamp field specified in the (`indexing_settings.timestamp_field`) settings. Using this setting, the retention policy will delete a split when `now() - split.time_range.end >= retention_policy.period`
 
 ```yaml
-version: 0.4
+version: 0.5
 index_id: hdfs
 # ...
 retention:

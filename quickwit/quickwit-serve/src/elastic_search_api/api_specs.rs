@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -19,11 +19,13 @@
 
 use std::str::FromStr;
 
-/// This file is auto-generated, any change can be overriden.
+use quickwit_common::simple_list::{from_simple_list, to_simple_list, SimpleList};
+/// This file is auto-generated, any change can be overridden.
 use serde::{Deserialize, Serialize};
 use warp::{Filter, Rejection};
 
-use super::{from_simple_list, to_simple_list, SimpleList, TrackTotalHits};
+use super::TrackTotalHits;
+
 #[serde_with::skip_serializing_none]
 #[derive(Default, Debug, Serialize, Deserialize)]
 pub struct SearchQueryParams {

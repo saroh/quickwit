@@ -32,11 +32,17 @@ docker-compose-down:
 docker-compose-logs:
 	docker compose logs -f -t
 
+docker-compose-monitoring:
+	COMPOSE_PROFILES=monitoring docker compose -f docker-compose.yml up -d --remove-orphans
+
 fmt:
 	@$(MAKE) -C $(QUICKWIT_SRC) fmt
 
 fix:
 	@$(MAKE) -C $(QUICKWIT_SRC) fix
+
+typos:
+	typos
 
 # Usage:
 # `make test-all` starts the Docker services and runs all the tests.

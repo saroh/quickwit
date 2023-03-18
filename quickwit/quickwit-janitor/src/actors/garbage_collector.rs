@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -376,13 +376,14 @@ mod tests {
         let garbage_collect_actor =
             GarbageCollector::new(Arc::new(mock_metastore), storage_resolver);
         let universe = Universe::with_accelerated_time();
-        let (_maibox, handler) = universe.spawn_builder().spawn(garbage_collect_actor);
+        let (_mailbox, handler) = universe.spawn_builder().spawn(garbage_collect_actor);
 
         let state_after_initialization = handler.process_pending_and_observe().await.state;
         assert_eq!(state_after_initialization.num_passes, 1);
         assert_eq!(state_after_initialization.num_deleted_files, 3);
         assert_eq!(state_after_initialization.num_deleted_bytes, 60);
         assert_eq!(state_after_initialization.num_failed_splits, 0);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -391,7 +392,7 @@ mod tests {
         let mut mock_metastore = MockMetastore::default();
         mock_metastore
             .expect_list_indexes_metadatas()
-            .times(2)
+            .times(3)
             .returning(|| {
                 Ok(vec![IndexMetadata::for_test(
                     "test-index",
@@ -400,7 +401,7 @@ mod tests {
             });
         mock_metastore
             .expect_list_splits()
-            .times(4)
+            .times(6)
             .returning(|query| {
                 assert_eq!(query.index_id, "test-index");
                 let splits = match query.split_states[0] {
@@ -414,7 +415,7 @@ mod tests {
             });
         mock_metastore
             .expect_mark_splits_for_deletion()
-            .times(2)
+            .times(3)
             .returning(|index_id, split_ids| {
                 assert_eq!(index_id, "test-index");
                 assert_eq!(split_ids, vec!["a"]);
@@ -422,7 +423,7 @@ mod tests {
             });
         mock_metastore
             .expect_delete_splits()
-            .times(2)
+            .times(3)
             .returning(|index_id, split_ids| {
                 assert_eq!(index_id, "test-index");
 
@@ -436,7 +437,7 @@ mod tests {
         let garbage_collect_actor =
             GarbageCollector::new(Arc::new(mock_metastore), storage_resolver);
         let universe = Universe::with_accelerated_time();
-        let (_maibox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
+        let (_mailbox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
 
         let counters = handle.process_pending_and_observe().await.state;
         assert_eq!(counters.num_passes, 1);
@@ -468,6 +469,7 @@ mod tests {
         assert_eq!(counters.num_failed_storage_resolution, 0);
         assert_eq!(counters.num_failed_gc_run_on_index, 0);
         assert_eq!(counters.num_failed_splits, 0);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -476,7 +478,7 @@ mod tests {
         let mut mock_metastore = MockMetastore::default();
         mock_metastore
             .expect_list_indexes_metadatas()
-            .times(3)
+            .times(4)
             .returning(|| {
                 Err(MetastoreError::DbError {
                     message: "Fail to list indexes.".to_string(),
@@ -486,7 +488,7 @@ mod tests {
         let garbage_collect_actor =
             GarbageCollector::new(Arc::new(mock_metastore), storage_resolver);
         let universe = Universe::with_accelerated_time();
-        let (_maibox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
+        let (_mailbox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
 
         let counters = handle.process_pending_and_observe().await.state;
         assert_eq!(counters.num_passes, 1);
@@ -498,6 +500,7 @@ mod tests {
         universe.sleep(RUN_INTERVAL).await;
         let counters = handle.process_pending_and_observe().await.state;
         assert_eq!(counters.num_passes, 3);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -517,7 +520,7 @@ mod tests {
         let garbage_collect_actor =
             GarbageCollector::new(Arc::new(mock_metastore), storage_resolver);
         let universe = Universe::with_accelerated_time();
-        let (_maibox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
+        let (_mailbox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
 
         let counters = handle.process_pending_and_observe().await.state;
         assert_eq!(counters.num_passes, 1);
@@ -527,6 +530,7 @@ mod tests {
         assert_eq!(counters.num_failed_storage_resolution, 1);
         assert_eq!(counters.num_failed_gc_run_on_index, 0);
         assert_eq!(counters.num_failed_splits, 0);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -544,7 +548,7 @@ mod tests {
             });
         mock_metastore
             .expect_list_splits()
-            .times(4)
+            .times(3)
             .returning(|query| {
                 assert!(["test-index-1", "test-index-2"].contains(&query.index_id));
 
@@ -565,7 +569,7 @@ mod tests {
             });
         mock_metastore
             .expect_mark_splits_for_deletion()
-            .times(2)
+            .once()
             .returning(|index_id, split_ids| {
                 assert!(["test-index-1", "test-index-2"].contains(&index_id));
                 assert_eq!(split_ids, vec!["a"]);
@@ -573,7 +577,7 @@ mod tests {
             });
         mock_metastore
             .expect_delete_splits()
-            .times(2)
+            .once()
             .returning(|_index_id, split_ids| {
                 let split_ids = HashSet::<&str>::from_iter(split_ids.iter().copied());
                 let expected_split_ids = HashSet::<&str>::from_iter(["a", "b"]);
@@ -585,7 +589,7 @@ mod tests {
         let garbage_collect_actor =
             GarbageCollector::new(Arc::new(mock_metastore), storage_resolver);
         let universe = Universe::with_accelerated_time();
-        let (_maibox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
+        let (_mailbox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
 
         let counters = handle.process_pending_and_observe().await.state;
         assert_eq!(counters.num_passes, 1);
@@ -595,6 +599,7 @@ mod tests {
         assert_eq!(counters.num_failed_storage_resolution, 0);
         assert_eq!(counters.num_failed_gc_run_on_index, 1);
         assert_eq!(counters.num_failed_splits, 0);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -656,7 +661,7 @@ mod tests {
         let garbage_collect_actor =
             GarbageCollector::new(Arc::new(mock_metastore), storage_resolver);
         let universe = Universe::with_accelerated_time();
-        let (_maibox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
+        let (_mailbox, handle) = universe.spawn_builder().spawn(garbage_collect_actor);
 
         let counters = handle.process_pending_and_observe().await.state;
         assert_eq!(counters.num_passes, 1);
@@ -666,5 +671,6 @@ mod tests {
         assert_eq!(counters.num_failed_storage_resolution, 0);
         assert_eq!(counters.num_failed_gc_run_on_index, 0);
         assert_eq!(counters.num_failed_splits, 2);
+        universe.assert_quit().await;
     }
 }

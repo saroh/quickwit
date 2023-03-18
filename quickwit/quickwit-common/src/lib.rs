@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -22,14 +22,23 @@
 mod checklist;
 mod coolid;
 
+pub mod binary_heap;
+mod file_entry;
 pub mod fs;
 pub mod io;
 mod kill_switch;
 pub mod metrics;
 pub mod net;
 mod progress;
+pub mod pubsub;
 pub mod rand;
+pub mod rendezvous_hasher;
 pub mod runtimes;
+pub mod simple_list;
+#[cfg(any(test, feature = "testsuite"))]
+pub mod test_utils;
+pub mod tower;
+pub mod type_map;
 pub mod uri;
 
 use std::env;
@@ -41,6 +50,7 @@ pub use checklist::{
     print_checklist, run_checklist, ChecklistError, BLUE_COLOR, GREEN_COLOR, RED_COLOR,
 };
 pub use coolid::new_coolid;
+pub use file_entry::FileEntry;
 pub use kill_switch::KillSwitch;
 pub use progress::{Progress, ProtectedZoneGuard};
 use tracing::{error, info};
@@ -61,7 +71,7 @@ pub fn setup_logging_for_tests() {
 }
 
 pub fn split_file(split_id: &str) -> String {
-    format!("{}.split", split_id)
+    format!("{split_id}.split")
 }
 
 pub fn get_from_env<T: FromStr + Debug>(key: &str, default_value: T) -> T {
@@ -157,7 +167,7 @@ where T: Debug
             if i > 0 {
                 write!(formatter, ", ")?;
             }
-            write!(formatter, "{:?}", item)?;
+            write!(formatter, "{item:?}")?;
         }
         write!(formatter, "]")?;
         Ok(())
@@ -205,18 +215,18 @@ mod tests {
     #[test]
     fn test_pretty_sample() {
         let pretty_sample = PrettySample::<'_, usize>::new(&[], 2);
-        assert_eq!(format!("{:?}", pretty_sample), "[]");
+        assert_eq!(format!("{pretty_sample:?}"), "[]");
 
         let pretty_sample = PrettySample::new(&[1], 2);
-        assert_eq!(format!("{:?}", pretty_sample), "[1]");
+        assert_eq!(format!("{pretty_sample:?}"), "[1]");
 
         let pretty_sample = PrettySample::new(&[1, 2], 2);
-        assert_eq!(format!("{:?}", pretty_sample), "[1, 2]");
+        assert_eq!(format!("{pretty_sample:?}"), "[1, 2]");
 
         let pretty_sample = PrettySample::new(&[1, 2, 3], 2);
-        assert_eq!(format!("{:?}", pretty_sample), "[1, 2, and 1 more]");
+        assert_eq!(format!("{pretty_sample:?}"), "[1, 2, and 1 more]");
 
         let pretty_sample = PrettySample::new(&[1, 2, 3, 4], 2);
-        assert_eq!(format!("{:?}", pretty_sample), "[1, 2, and 2 more]");
+        assert_eq!(format!("{pretty_sample:?}"), "[1, 2, and 2 more]");
     }
 }

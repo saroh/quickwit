@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -92,16 +92,8 @@ pub trait DocMapper: Send + Sync + Debug + DynClone + 'static {
         request: &SearchRequest,
     ) -> Result<(Box<dyn Query>, WarmupInfo), QueryParserError>;
 
-    /// Returns the timestamp field.
-    /// Considering schema evolution, splits within an index can have different schema
-    /// over time. So `split_schema` is the schema of the split being operated on.
-    fn timestamp_field(&self, split_schema: &Schema) -> Option<Field> {
-        self.timestamp_field_name()
-            .and_then(|field_name| split_schema.get_field(&field_name))
-    }
-
     /// Returns the timestamp field name.
-    fn timestamp_field_name(&self) -> Option<String> {
+    fn timestamp_field_name(&self) -> Option<&str> {
         None
     }
 
@@ -119,7 +111,7 @@ pub trait DocMapper: Send + Sync + Debug + DynClone + 'static {
             .map(|field_name| {
                 index_schema
                     .get_field(field_name)
-                    .context(format!("Field `{}` must exist in the schema.", field_name))
+                    .context(format!("Field `{field_name}` must exist in the schema."))
                     .map(|field| NamedField {
                         name: field_name.clone(),
                         field,
@@ -146,11 +138,11 @@ pub struct NamedField {
 
 clone_trait_object!(DocMapper);
 
-/// Informations about what a DocMapper think should be warmed up before
+/// Information about what a DocMapper think should be warmed up before
 /// running the query.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct WarmupInfo {
-    /// Name of fields from the term dictionnary which needs to be entirely
+    /// Name of fields from the term dictionary which needs to be entirely
     /// loaded
     pub term_dict_field_names: HashSet<String>,
     /// Name of fields from the posting lists which needs to be entirely
@@ -211,8 +203,8 @@ mod tests {
             serde_json::from_str::<Box<dyn DocMapper>>(JSON_DEFAULT_DOC_MAPPER)?;
         let expected_default_doc_mapper = DefaultDocMapperBuilder::default().try_build()?;
         assert_eq!(
-            format!("{:?}", deserialized_default_doc_mapper),
-            format!("{:?}", expected_default_doc_mapper),
+            format!("{deserialized_default_doc_mapper:?}"),
+            format!("{expected_default_doc_mapper:?}"),
         );
         Ok(())
     }
@@ -223,8 +215,8 @@ mod tests {
             serde_json::from_str::<Box<dyn DocMapper>>(r#"{"type": "default"}"#)?;
         let expected_default_doc_mapper = DefaultDocMapperBuilder::default().try_build()?;
         assert_eq!(
-            format!("{:?}", deserialized_default_doc_mapper),
-            format!("{:?}", expected_default_doc_mapper),
+            format!("{deserialized_default_doc_mapper:?}"),
+            format!("{expected_default_doc_mapper:?}"),
         );
         Ok(())
     }
@@ -252,8 +244,8 @@ mod tests {
             serde_json::from_str::<Box<dyn DocMapper>>(JSON_DEFAULT_DOC_MAPPER)?;
         let expected_default_doc_mapper = DefaultDocMapperBuilder::default().try_build()?;
         assert_eq!(
-            format!("{:?}", deserialized_default_doc_mapper),
-            format!("{:?}", expected_default_doc_mapper),
+            format!("{deserialized_default_doc_mapper:?}"),
+            format!("{expected_default_doc_mapper:?}"),
         );
 
         let serialized_doc_mapper = serde_json::to_string(&deserialized_default_doc_mapper)?;
@@ -293,7 +285,7 @@ mod tests {
         };
         let (query, _) = doc_mapper.query(schema, &search_request).unwrap();
         assert_eq!(
-            format!("{:?}", query),
+            format!("{query:?}"),
             r#"TermQuery(Term(type=Json, field=0, path=toto.titi, vtype=Str, "hello"))"#
         );
     }
@@ -330,7 +322,7 @@ mod tests {
         };
         let query = doc_mapper.query(schema, &search_request).unwrap_err();
         assert_eq!(
-            format!("{:?}", query),
+            format!("{query:?}"),
             "QueryParserError(Sort by field on type text is currently not supported `text_field`.)"
         );
     }
@@ -365,7 +357,7 @@ mod tests {
         };
         let (query, _) = doc_mapper.query(schema, &search_request).unwrap();
         assert_eq!(
-            format!("{:?}", query),
+            format!("{query:?}"),
             r#"TermQuery(Term(type=Json, field=0, path=toto.titi, vtype=Str, "hello"))"#
         );
     }
@@ -400,7 +392,7 @@ mod tests {
         };
         let (query, _) = doc_mapper.query(schema, &search_request).unwrap();
         assert_eq!(
-            format!("{:?}", query),
+            format!("{query:?}"),
             r#"BooleanQuery { subqueries: [(Should, TermQuery(Term(type=Json, field=0, path=toto, vtype=U64, 5))), (Should, TermQuery(Term(type=Json, field=0, path=toto, vtype=Str, "5")))] }"#
         );
     }

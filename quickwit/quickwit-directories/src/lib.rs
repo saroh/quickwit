@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -19,7 +19,7 @@
 
 //! This crate contains all of the building pieces that make quickwit's IO possible.
 //!
-//! - The `StorageDirectory` justs wraps a `Storage` trait to make it compatible with tantivy's
+//! - The `StorageDirectory` just wraps a `Storage` trait to make it compatible with tantivy's
 //!   Directory API.
 //! - The `BundleDirectory` bundles multiple files into a single file.
 //! - The `HotDirectory` wraps another directory with a static cache.

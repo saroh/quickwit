@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -407,6 +407,7 @@ mod tests {
         assert_eq!(count.load(Ordering::SeqCst), 0);
         universe.sleep(Duration::from_millis(15)).await;
         assert_eq!(count.load(Ordering::SeqCst), 1);
+        universe.assert_quit().await;
     }
 
     #[tokio::test]
@@ -425,5 +426,6 @@ mod tests {
         let elapsed = start.elapsed();
         // The whole point is to accelerate time.
         assert!(elapsed.as_millis() < 50);
+        universe.assert_quit().await;
     }
 }

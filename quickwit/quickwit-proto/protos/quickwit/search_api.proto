@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -44,6 +44,21 @@ service SearchService {
 
   // Perform a leaf stream on a given set of splits.
   rpc LeafSearchStream(LeafSearchStreamRequest) returns (stream LeafSearchStreamResponse);
+
+  // Root list terms API.
+  // This RPC identifies the set of splits on which the query should run on,
+  // and dispatches the several calls to `LeafListTerms`.
+  //
+  // It is also in charge of merging back the results.
+  rpc RootListTerms(ListTermsRequest) returns (ListTermsResponse);
+
+  // Perform a leaf list terms on a given set of splits.
+  //
+  // It is like a regular list term except that:
+  // - the node should perform the listing locally instead of dispatching
+  // it to other nodes.
+  // - it should be applied on the given subset of splits
+  rpc LeafListTerms(LeafListTermsRequest) returns (LeafListTermsResponse);
 }
 
 // -- Search -------------------
@@ -58,7 +73,9 @@ message SearchRequest {
   // Fields to search on
   repeated string  search_fields = 3;
 
-  // Time filter
+  // Time filter, expressed in seconds since epoch.
+  // That filter is to be interpreted as the semi-open interval:
+  // [start_timestamp, end_timestamp).
   optional int64 start_timestamp = 4;
   optional int64 end_timestamp = 5;
 
@@ -83,7 +100,7 @@ message SearchRequest {
 
   // json serialized aggregation_request
   optional string aggregation_request = 11;
-  
+
   // Fields to extract snippet on
   repeated string  snippet_fields = 12;
 }
@@ -104,7 +121,7 @@ message SearchResponse {
   // server-side and expressed in microseconds.
   uint64 elapsed_time_micros = 3;
 
-  // The searcherrors that occured formatted as string.
+  // The searcherrors that occurred formatted as string.
   repeated string errors = 4;
 
   // Serialized aggregation response
@@ -113,7 +130,7 @@ message SearchResponse {
 }
 
 message SplitSearchError {
-  // The searcherror that occured formatted as string.
+  // The searcherror that occurred formatted as string.
   string error = 1;
 
   // Split id that failed.
@@ -147,7 +164,7 @@ message SplitIdAndFooterOffsets {
   string split_id = 1;
   // The offset of the start of footer in the split bundle. The footer contains the file bundle metadata and the hotcache.
   uint64 split_footer_start = 2;
-  // The offset of the end of the footer in split bundle. The footer contains the file bundle metada and the hotcache.
+  // The offset of the end of the footer in split bundle. The footer contains the file bundle metadata and the hotcache.
   uint64 split_footer_end = 3;
 
 }
@@ -170,7 +187,7 @@ message LeafHit {
   string leaf_json = 1;
   // The partial hit (ie: the sorting field + the document address)
   PartialHit partial_hit = 2;
-  // A snippet of the matching content 
+  // A snippet of the matching content
   optional string leaf_snippet_json = 3;
 }
 
@@ -179,7 +196,7 @@ message Hit {
   string json = 1;
   // The partial hit (ie: the sorting field + the document address)
   PartialHit partial_hit = 2;
-  // A snippet of the matching content 
+  // A snippet of the matching content
   optional string snippet = 3;
 }
 
@@ -257,6 +274,65 @@ message FetchDocsResponse {
   repeated LeafHit hits = 1;
 }
 
+message ListTermsRequest {
+  // Index ID
+  string index_id = 1;
+
+  // Field to search on
+  string field = 3;
+
+  // Time filter
+  optional int64 start_timestamp = 4;
+  optional int64 end_timestamp = 5;
+
+  // Maximum number of hits to return.
+  optional uint64 max_hits = 6;
+
+  // start_key is included, end_key is excluded
+  optional bytes start_key = 7;
+  optional bytes end_key = 8;
+}
+
+message ListTermsResponse {
+  // Number of hits matching the query.
+  uint64 num_hits = 1;
+  // Matched hits
+  repeated bytes terms = 2;
+  // Elapsed time to perform the request. This time is measured
+  // server-side and expressed in microseconds.
+  uint64 elapsed_time_micros = 3;
+
+  // The searcherrors that occurred formatted as string.
+  repeated string errors = 4;
+}
+
+message LeafListTermsRequest {
+  // Search request. This is a perfect copy of the original list request,
+  ListTermsRequest list_terms_request = 1;
+
+  // Index split ids to apply the query on.
+  // This ids are resolved from the index_uri defined in the search_request.
+  repeated SplitIdAndFooterOffsets split_offsets = 2;
+
+  // Index URI. The index URI defines the location of the storage that contains the
+  // split files.
+  string index_uri = 3;
+}
+
+message LeafListTermsResponse {
+  // Total number of documents matched by the query.
+  uint64 num_hits = 1;
+
+  // List of the first K terms the given leaf query.
+  repeated bytes terms = 2;
+
+  // The list of splits that failed. LeafSearchResponse can be an aggregation of results, so there may be multiple.
+  repeated SplitSearchError failed_splits = 3;
+
+  // Total number of splits the leaf(s) were in charge of.
+  // num_attempted_splits = num_successful_splits + num_failed_splits.
+  uint64 num_attempted_splits = 4;
+}
 
 // -- Stream -------------------
 

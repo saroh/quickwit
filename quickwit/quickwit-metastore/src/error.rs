@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -101,7 +101,7 @@ impl From<MetastoreError> for quickwit_proto::tonic::Status {
     fn from(metastore_error: MetastoreError) -> Self {
         let grpc_code = metastore_error.status_code().to_grpc_status_code();
         let error_msg = serde_json::to_string(&metastore_error)
-            .unwrap_or_else(|_| format!("Raw metastore error: {}", metastore_error));
+            .unwrap_or_else(|_| format!("Raw metastore error: {metastore_error}"));
         quickwit_proto::tonic::Status::new(grpc_code, error_msg)
     }
 }
@@ -110,7 +110,7 @@ impl ServiceError for MetastoreError {
     fn status_code(&self) -> ServiceErrorCode {
         match self {
             Self::ConnectionError { .. } => ServiceErrorCode::Internal,
-            Self::Forbidden { .. } => ServiceErrorCode::Internal,
+            Self::Forbidden { .. } => ServiceErrorCode::MethodNotAllowed,
             Self::IncompatibleCheckpointDelta(_) => ServiceErrorCode::BadRequest,
             Self::IndexAlreadyExists { .. } => ServiceErrorCode::BadRequest,
             Self::IndexDoesNotExist { .. } => ServiceErrorCode::NotFound,

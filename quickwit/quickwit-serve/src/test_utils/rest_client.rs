@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -20,8 +20,9 @@
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use anyhow::{bail, Context};
 use hyper::client::HttpConnector;
-use hyper::{Body, Response, StatusCode};
+use hyper::{Body, Request, Response, StatusCode};
 use quickwit_cluster::ClusterSnapshot;
 use quickwit_indexing::actors::IndexingServiceCounters;
 use serde::de::DeserializeOwned;
@@ -38,8 +39,50 @@ impl QuickwitRestClient {
             .pool_idle_timeout(Duration::from_secs(30))
             .http2_only(true)
             .build_http();
-        let root_url = format!("http://{}", addr);
+        let root_url = format!("http://{addr}");
         Self { root_url, client }
+    }
+
+    pub async fn ingest_data(&self, index_id: &str, ndjson_doc: &str) -> anyhow::Result<()> {
+        let uri = format!("{}/api/v1/{index_id}/ingest", self.root_url)
+            .parse::<hyper::Uri>()
+            .unwrap();
+        let request = Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("content-type", "application/json")
+            .body(Body::from(ndjson_doc.to_string()))
+            .unwrap();
+        let response = self
+            .client
+            .request(request)
+            .await
+            .context("Failed to emit request")?;
+        if response.status() != StatusCode::OK {
+            let body_bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+            let body_str = String::from_utf8_lossy(&body_bytes);
+            bail!("error when creating index: {body_str}");
+        }
+        Ok(())
+    }
+
+    pub async fn create_index(&self, index_config_yaml: &str) -> anyhow::Result<()> {
+        let uri = format!("{}/api/v1/indexes", self.root_url)
+            .parse::<hyper::Uri>()
+            .unwrap();
+        let request = Request::builder()
+            .uri(uri)
+            .method("POST")
+            .header("content-type", "application/yaml")
+            .body(Body::from(index_config_yaml.to_string()))
+            .unwrap();
+        let response = self.client.request(request).await.unwrap();
+        if response.status() == StatusCode::OK {
+            return Ok(());
+        }
+        let body_bytes = hyper::body::to_bytes(response.into_body()).await.unwrap();
+        let body_string = String::from_utf8(body_bytes.to_vec()).unwrap();
+        Err(anyhow::anyhow!("error when creating index: {body_string}"))
     }
 
     pub async fn cluster_snapshot(&self) -> anyhow::Result<ClusterSnapshot> {
@@ -81,11 +124,19 @@ impl QuickwitRestClient {
         }
         Ok(false)
     }
+
+    pub fn client(&self) -> hyper::Client<HttpConnector, Body> {
+        self.client.clone()
+    }
+
+    pub fn root_url(&self) -> String {
+        self.root_url.clone()
+    }
 }
 
 async fn parse_body<T: DeserializeOwned>(mut response: Response<Body>) -> anyhow::Result<T> {
     if response.status() != StatusCode::OK {
-        anyhow::bail!("Unexepected status {}", response.status());
+        anyhow::bail!("Unexpected status {}", response.status());
     }
     let mut body = Vec::new();
     while let Some(chunk) = response.body_mut().next().await {

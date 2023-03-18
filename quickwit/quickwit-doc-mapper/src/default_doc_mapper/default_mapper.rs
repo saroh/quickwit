@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -41,8 +41,9 @@ use crate::{
 };
 
 /// Defines how an unmapped field should be handled.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub(crate) enum Mode {
+    #[default]
     Lenient,
     Strict,
     Dynamic(QuickwitJsonOptions),
@@ -55,12 +56,6 @@ impl Mode {
             Mode::Strict => ModeType::Strict,
             Mode::Dynamic(_) => ModeType::Dynamic,
         }
-    }
-}
-
-impl Default for Mode {
-    fn default() -> Self {
-        Mode::Lenient
     }
 }
 
@@ -123,9 +118,7 @@ impl DefaultDocMapper {
 
 fn validate_tag_fields(tag_fields: &[String], schema: &Schema) -> anyhow::Result<()> {
     for tag_field in tag_fields {
-        let field = schema
-            .get_field(tag_field)
-            .ok_or_else(|| anyhow::anyhow!("Tag field `{}` does not exist.", tag_field))?;
+        let field = schema.get_field(tag_field)?;
         let field_type = schema.get_field_entry(field).field_type();
         match field_type {
             FieldType::Str(options) => {
@@ -174,7 +167,7 @@ fn resolve_timestamp_field(
     if let Some(ref timestamp_field_name) = timestamp_field_name_opt {
         let timestamp_field = schema
             .get_field(timestamp_field_name)
-            .with_context(|| format!("Unknown timestamp field: `{}`", timestamp_field_name))?;
+            .with_context(|| format!("Unknown timestamp field: `{timestamp_field_name}`"))?;
 
         let timestamp_field_entry = schema.get_field_entry(timestamp_field);
         if !timestamp_field_entry.is_fast() {
@@ -238,7 +231,7 @@ impl TryFrom<DefaultDocMapperBuilder> for DefaultDocMapper {
             }
             schema
                 .get_field(field_name)
-                .with_context(|| format!("Unknown default search field: `{}`", field_name))?;
+                .with_context(|| format!("Unknown default search field: `{field_name}`"))?;
             default_search_field_names.push(field_name.clone());
         }
 
@@ -252,7 +245,7 @@ impl TryFrom<DefaultDocMapperBuilder> for DefaultDocMapper {
             }
             schema
                 .get_field(tag_field_name)
-                .with_context(|| format!("Unknown tag field: `{}`", tag_field_name))?;
+                .with_context(|| format!("Unknown tag field: `{tag_field_name}`"))?;
             tag_field_names.insert(tag_field_name.clone());
         }
 
@@ -290,7 +283,9 @@ impl From<DefaultDocMapper> for DefaultDocMapperBuilder {
         };
         Self {
             store_source: default_doc_mapper.source_field.is_some(),
-            timestamp_field: default_doc_mapper.timestamp_field_name(),
+            timestamp_field: default_doc_mapper
+                .timestamp_field_name()
+                .map(ToString::to_string),
             field_mappings: default_doc_mapper.field_mappings.into(),
             tag_fields: default_doc_mapper.tag_field_names.into_iter().collect(),
             default_search_fields: default_doc_mapper.default_search_field_names,
@@ -413,8 +408,8 @@ impl DocMapper for DefaultDocMapper {
         self.schema.clone()
     }
 
-    fn timestamp_field_name(&self) -> Option<String> {
-        self.timestamp_field_name.clone()
+    fn timestamp_field_name(&self) -> Option<&str> {
+        self.timestamp_field_name.as_deref()
     }
 
     fn tag_field_names(&self) -> BTreeSet<String> {
@@ -517,13 +512,10 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|expected_value| format!("{}", expected_value))
+                    .map(|expected_value| format!("{expected_value}"))
                     .any(|expected_value| expected_value == value);
                 if !is_value_in_expected_values {
-                    panic!(
-                        "Could not find: {:?} in {:?}",
-                        value, expected_json_paths_and_values
-                    );
+                    panic!("Could not find: {value:?} in {expected_json_paths_and_values:?}");
                 }
             }
         });
@@ -718,10 +710,9 @@ mod tests {
         let deser_err = serde_json::from_str::<DefaultDocMapperBuilder>(doc_mapper)
             .err()
             .unwrap();
-        assert_eq!(
-            deser_err.to_string(),
-            "Field name `_source` may not start by _ at line 9 column 13"
-        );
+        assert!(deser_err
+            .to_string()
+            .contains("The following fields are reserved for Quickwit internal usage"));
     }
 
     #[test]
@@ -805,7 +796,7 @@ mod tests {
                     .as_array()
                     .unwrap()
                     .iter()
-                    .map(|expected_value| format!("{}", expected_value))
+                    .map(|expected_value| format!("{expected_value}"))
                     .any(|expected_value| expected_value == value);
                 assert!(is_value_in_expected_values);
             }
@@ -1101,7 +1092,7 @@ mod tests {
         let (query, _) = doc_mapper
             .query(doc_mapper.schema(), &search_request)
             .map_err(|err| err.to_string())?;
-        Ok(format!("{:?}", query))
+        Ok(format!("{query:?}"))
     }
 
     #[test]

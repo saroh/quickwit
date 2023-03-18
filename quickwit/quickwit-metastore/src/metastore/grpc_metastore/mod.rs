@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -90,8 +90,7 @@ impl MetastoreGrpcClient {
         let underlying =
             MetastoreApiServiceClient::with_interceptor(channel, SpanContextInterceptor);
         let uri = QuickwitUri::from_well_formed(format!(
-            "{}:{}",
-            GRPC_METASTORE_BASE_URI, grpc_advertise_port
+            "{GRPC_METASTORE_BASE_URI}:{grpc_advertise_port}"
         ));
         Ok(Self {
             uri,
@@ -636,8 +635,8 @@ mod tests {
         metastore: Arc<dyn Metastore>,
     ) -> anyhow::Result<()> {
         tokio::spawn(async move {
-            let grpc_adpater = GrpcMetastoreAdapter::from(metastore);
-            let service = MetastoreApiServiceServer::new(grpc_adpater);
+            let grpc_adapter = GrpcMetastoreAdapter::from(metastore);
+            let service = MetastoreApiServiceServer::new(grpc_adapter);
             Server::builder()
                 .add_service(service)
                 .serve(address)
@@ -673,7 +672,7 @@ mod tests {
             HashSet::from([QuickwitService::Metastore, QuickwitService::Indexer]),
             metastore_service_grpc_addr,
             metastore_service_grpc_addr,
-            None,
+            Vec::new(),
         );
         let searcher_member = ClusterMember::new(
             "2".to_string(),
@@ -681,7 +680,7 @@ mod tests {
             HashSet::from([QuickwitService::Searcher]),
             searcher_grpc_addr,
             searcher_grpc_addr,
-            None,
+            Vec::new(),
         );
         let (members_tx, members_rx) =
             watch::channel::<Vec<ClusterMember>>(vec![metastore_service_member.clone()]);
@@ -758,7 +757,7 @@ mod tests {
             HashSet::from([QuickwitService::Metastore]),
             grpc_addr_1,
             grpc_addr_1,
-            None,
+            Vec::new(),
         );
         let metastore_member_2 = ClusterMember::new(
             "2".to_string(),
@@ -766,7 +765,7 @@ mod tests {
             HashSet::from([QuickwitService::Metastore]),
             grpc_addr_2,
             grpc_addr_2,
-            None,
+            Vec::new(),
         );
         let metastore_member_3 = ClusterMember::new(
             "3".to_string(),
@@ -774,7 +773,7 @@ mod tests {
             HashSet::from([QuickwitService::Metastore]),
             grpc_addr_3,
             grpc_addr_3,
-            None,
+            Vec::new(),
         );
         let (members_tx, members_rx) =
             watch::channel::<Vec<ClusterMember>>(vec![metastore_member_1.clone()]);

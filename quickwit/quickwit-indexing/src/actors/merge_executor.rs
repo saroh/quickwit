@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -31,13 +31,12 @@ use quickwit_actors::{Actor, ActorContext, ActorExitStatus, Handler, Mailbox, Qu
 use quickwit_common::io::IoControls;
 use quickwit_common::runtimes::RuntimeType;
 use quickwit_directories::UnionDirectory;
-use quickwit_doc_mapper::fast_field_reader::timestamp_field_reader;
 use quickwit_doc_mapper::{DocMapper, QUICKWIT_TOKENIZER_MANAGER};
 use quickwit_metastore::{Metastore, SplitMetadata};
 use quickwit_proto::metastore_api::DeleteTask;
 use quickwit_proto::SearchRequest;
 use tantivy::directory::{DirectoryClone, MmapDirectory, RamDirectory};
-use tantivy::{Directory, Index, IndexMeta, SegmentId, SegmentReader, TantivyError};
+use tantivy::{DateTime, Directory, Index, IndexMeta, SegmentId, SegmentReader};
 use tokio::runtime::Handle;
 use tracing::{debug, info, instrument, warn};
 
@@ -175,14 +174,17 @@ fn create_shadowing_meta_json_directory(index_meta: IndexMeta) -> anyhow::Result
     Ok(ram_directory)
 }
 
-fn merge_time_range(splits: &[SplitMetadata]) -> Option<RangeInclusive<i64>> {
+fn merge_time_range(splits: &[SplitMetadata]) -> Option<RangeInclusive<DateTime>> {
     splits
         .iter()
         .flat_map(|split| split.time_range.clone())
         .flat_map(|time_range| vec![*time_range.start(), *time_range.end()].into_iter())
         .minmax()
         .into_option()
-        .map(|(min_timestamp, max_timestamp)| min_timestamp..=max_timestamp)
+        .map(|(min_timestamp, max_timestamp)| {
+            DateTime::from_timestamp_secs(min_timestamp)
+                ..=DateTime::from_timestamp_secs(max_timestamp)
+        })
 }
 
 fn sum_doc_sizes_in_bytes(splits: &[SplitMetadata]) -> u64 {
@@ -228,7 +230,7 @@ pub fn merge_split_attrs(
     splits: &[SplitMetadata],
 ) -> SplitAttrs {
     let partition_id = combine_partition_ids_aux(splits.iter().map(|split| split.partition_id));
-    let time_range = merge_time_range(splits);
+    let time_range: Option<RangeInclusive<DateTime>> = merge_time_range(splits);
     let uncompressed_docs_size_in_bytes = sum_doc_sizes_in_bytes(splits);
     let num_docs = sum_num_docs(splits);
     let replaced_split_ids: Vec<String> = splits
@@ -387,22 +389,15 @@ impl MergeExecutor {
         let uncompressed_docs_size_in_bytes = (num_docs as f32
             * split.uncompressed_docs_size_in_bytes as f32
             / split.num_docs as f32) as u64;
-        let time_range =
-            if let Some(ref timestamp_field_name) = self.doc_mapper.timestamp_field_name() {
-                let timestamp_field = merged_segment_reader
-                    .schema()
-                    .get_field(timestamp_field_name)
-                    .ok_or_else(|| {
-                        TantivyError::SchemaError(format!(
-                            "Timestamp field `{}` does not exist",
-                            timestamp_field_name
-                        ))
-                    })?;
-                let reader = timestamp_field_reader(timestamp_field, &merged_segment_reader)?;
-                Some(reader.min_value()..=reader.max_value())
-            } else {
-                None
-            };
+        let time_range = if let Some(timestamp_field_name) = self.doc_mapper.timestamp_field_name()
+        {
+            let reader = merged_segment_reader
+                .fast_fields()
+                .date(timestamp_field_name)?;
+            Some(reader.min_value()..=reader.max_value())
+        } else {
+            None
+        };
 
         let index_pipeline_id = IndexingPipelineId {
             index_id: split.index_id.clone(),
@@ -533,7 +528,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_merge_executor() -> anyhow::Result<()> {
-        let universe = Universe::with_accelerated_time();
         let pipeline_id = IndexingPipelineId {
             index_id: "test-index".to_string(),
             source_id: "test-source".to_string(),
@@ -555,7 +549,7 @@ mod tests {
             TestSandbox::create(&pipeline_id.index_id, doc_mapping_yaml, "", &["body"]).await?;
         for split_id in 0..4 {
             let single_doc = std::iter::once(
-                serde_json::json!({"body ": format!("split{}", split_id), "ts": 1631072713u64 + split_id }),
+                serde_json::json!({"body ": format!("split{split_id}"), "ts": 1631072713u64 + split_id }),
             );
             test_sandbox.add_documents(single_doc).await?;
         }
@@ -589,7 +583,8 @@ mod tests {
             merge_scratch_directory,
             downloaded_splits_directory,
         };
-        let (merge_packager_mailbox, merge_packager_inbox) = universe.create_test_mailbox();
+        let (merge_packager_mailbox, merge_packager_inbox) =
+            test_sandbox.universe().create_test_mailbox();
         let merge_executor = MergeExecutor::new(
             pipeline_id,
             metastore,
@@ -597,8 +592,10 @@ mod tests {
             IoControls::default(),
             merge_packager_mailbox,
         );
-        let (merge_executor_mailbox, merge_executor_handle) =
-            universe.spawn_builder().spawn(merge_executor);
+        let (merge_executor_mailbox, merge_executor_handle) = test_sandbox
+            .universe()
+            .spawn_builder()
+            .spawn(merge_executor);
         merge_executor_mailbox.send_message(merge_scratch).await?;
         merge_executor_handle.process_pending_and_observe().await;
         let packager_msgs: Vec<IndexedSplitBatch> = merge_packager_inbox.drain_for_test_typed();
@@ -614,6 +611,7 @@ mod tests {
             .try_into()?;
         let searcher = reader.searcher();
         assert_eq!(searcher.segment_readers().len(), 1);
+        test_sandbox.assert_quit().await;
         Ok(())
     }
 
@@ -798,7 +796,8 @@ mod tests {
                     |split| split.split_state == quickwit_metastore::SplitState::MarkedForDeletion
                 ));
         }
-
+        test_sandbox.assert_quit().await;
+        universe.assert_quit().await;
         Ok(())
     }
 

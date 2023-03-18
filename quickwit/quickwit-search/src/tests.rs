@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -23,12 +23,15 @@ use assert_json_diff::{assert_json_eq, assert_json_include};
 use quickwit_config::SearcherConfig;
 use quickwit_doc_mapper::DefaultDocMapper;
 use quickwit_indexing::TestSandbox;
-use quickwit_proto::{SearchRequest, SortOrder};
+use quickwit_opentelemetry::otlp::TraceId;
+use quickwit_proto::{LeafListTermsResponse, SearchRequest, SortOrder};
 use serde_json::{json, Value as JsonValue};
 use tantivy::schema::Value as TantivyValue;
 use tantivy::time::OffsetDateTime;
+use tantivy::Term;
 
 use super::*;
+use crate::find_trace_ids_collector::Span;
 use crate::single_node_search;
 
 #[tokio::test]
@@ -74,6 +77,7 @@ async fn test_single_node_simple() -> anyhow::Result<()> {
     assert_json_include!(actual: hit_json, expected: expected_json);
     assert!(single_node_result.elapsed_time_micros > 10);
     assert!(single_node_result.elapsed_time_micros < 1_000_000);
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -119,6 +123,7 @@ async fn test_single_node_termset() -> anyhow::Result<()> {
     assert_json_include!(actual: hit_json, expected: expected_json);
     assert!(single_node_result.elapsed_time_micros > 10);
     assert!(single_node_result.elapsed_time_micros < 1_000_000);
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -171,6 +176,7 @@ async fn test_single_search_with_snippet() -> anyhow::Result<()> {
         "body": ["The <b>beagle</b> is a breed of small scent hound"]
     });
     assert_json_eq!(highlight_json, expected_json);
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -198,14 +204,12 @@ async fn slop_search_and_check(
     .await?;
     assert_eq!(
         single_node_result.num_hits, expected_num_match,
-        "query: {}",
-        query
+        "query: {query}"
     );
     assert_eq!(
         single_node_result.hits.len(),
         expected_num_match as usize,
-        "query: {}",
-        query
+        "query: {query}"
     );
     Ok(())
 }
@@ -240,6 +244,7 @@ async fn test_slop_queries() -> anyhow::Result<()> {
     slop_search_and_check(&test_sandbox, index_id, "\"small bike\"~2", 2).await?;
     slop_search_and_check(&test_sandbox, index_id, "\"small bike\"~3", 3).await?;
     slop_search_and_check(&test_sandbox, index_id, "\"tiny shelter\"~3", 1).await?;
+    test_sandbox.assert_quit().await;
 
     Ok(())
 }
@@ -312,6 +317,7 @@ async fn test_single_node_several_splits() -> anyhow::Result<()> {
     })));
     assert!(single_node_result.elapsed_time_micros > 10);
     assert!(single_node_result.elapsed_time_micros < 1_000_000);
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -423,6 +429,7 @@ async fn test_single_node_filtering() -> anyhow::Result<()> {
         single_node_response.err().map(|err| err.to_string()),
         Some("Invalid query: Field does not exist: 'tag'".to_string())
     );
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -481,7 +488,7 @@ async fn single_node_search_sort_by_field(
     let start_timestamp = 72057595;
     for i in 0..30 {
         let timestamp = start_timestamp + (i + 1) as i64;
-        let description = format!("city info-{}", timestamp);
+        let description = format!("city info-{timestamp}");
         docs.push(json!({"description": description, "ts": timestamp, "temperature": i+32}));
     }
     test_sandbox.add_documents(docs).await?;
@@ -498,21 +505,31 @@ async fn single_node_search_sort_by_field(
         sort_order: Some(SortOrder::Desc as i32),
         ..Default::default()
     };
-    let single_node_response = single_node_search(
+
+    match single_node_search(
         &search_request,
         &*test_sandbox.metastore(),
         test_sandbox.storage_uri_resolver(),
     )
-    .await?;
-    assert_eq!(single_node_response.num_hits, 30);
-    assert_eq!(single_node_response.hits.len(), 15);
-    assert!(single_node_response.hits.windows(2).all(|hits| hits[0]
-        .partial_hit
-        .as_ref()
-        .unwrap()
-        .sorting_field_value
-        >= hits[1].partial_hit.as_ref().unwrap().sorting_field_value));
-    Ok(())
+    .await
+    {
+        Ok(single_node_response) => {
+            assert_eq!(single_node_response.num_hits, 30);
+            assert_eq!(single_node_response.hits.len(), 15);
+            assert!(single_node_response.hits.windows(2).all(|hits| hits[0]
+                .partial_hit
+                .as_ref()
+                .unwrap()
+                .sorting_field_value
+                >= hits[1].partial_hit.as_ref().unwrap().sorting_field_value));
+            test_sandbox.assert_quit().await;
+            Ok(())
+        }
+        Err(err) => {
+            test_sandbox.assert_quit().await;
+            Err(err).map_err(anyhow::Error::from)
+        }
+    }
 }
 
 #[tokio::test]
@@ -584,6 +601,7 @@ async fn test_single_node_invalid_sorting_with_query() -> anyhow::Result<()> {
                 .to_string()
         )
     );
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -652,6 +670,7 @@ async fn test_single_node_split_pruning_by_tags() -> anyhow::Result<()> {
             .collect::<Vec<&str>>(),
         vec!["owner!", "owner:adrien", "owner:paul"]
     );
+    test_sandbox.assert_quit().await;
 
     Ok(())
 }
@@ -723,6 +742,7 @@ async fn test_search_dynamic_mode() -> anyhow::Result<()> {
         let docs = test_search_dynamic_util(&test_sandbox, "body_dynamic:hello").await;
         assert_eq!(&docs[..], &[3u32]); // 1 is not matched due to the raw tokenizer
     }
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -753,6 +773,7 @@ async fn test_search_dynamic_mode_expand_dots() -> anyhow::Result<()> {
             test_search_dynamic_util(&test_sandbox, r#"k8s\.component\.name:quickwit"#).await;
         assert_eq!(&docs[..], &[0u32]);
     }
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -783,6 +804,7 @@ async fn test_search_dynamic_mode_do_not_expand_dots() -> anyhow::Result<()> {
         let docs = test_search_dynamic_util(&test_sandbox, r#"k8s.component.name:quickwit"#).await;
         assert!(docs.is_empty());
     }
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -1019,6 +1041,7 @@ async fn test_single_node_aggregation() -> anyhow::Result<()> {
     );
     assert!(single_node_result.elapsed_time_micros > 10);
     assert!(single_node_result.elapsed_time_micros < 1_000_000);
+    test_sandbox.assert_quit().await;
     Ok(())
 }
 
@@ -1080,6 +1103,7 @@ async fn test_single_node_aggregation_missing_fast_field() -> anyhow::Result<()>
     assert_eq!(single_node_result.errors.len(), 1);
     assert!(single_node_result.errors[0].contains("color"));
     assert!(single_node_result.errors[0].contains("is not a fast field"));
+    test_sandbox.assert_quit().await;
 
     Ok(())
 }
@@ -1146,8 +1170,9 @@ async fn test_single_node_with_ip_field() -> anyhow::Result<()> {
         let hit_json: JsonValue = serde_json::from_str(&single_node_result.hits[0].json)?;
         let expected_json: JsonValue = json!({"log": "Request successful", "host": "10.10.11.125"});
         assert_json_include!(actual: hit_json, expected: expected_json);
-        Ok(())
     }
+    test_sandbox.assert_quit().await;
+    Ok(())
 }
 
 #[tokio::test]
@@ -1283,5 +1308,221 @@ async fn test_single_node_range_queries() -> anyhow::Result<()> {
         assert_eq!(single_node_result.num_hits, 4);
         assert_eq!(single_node_result.hits.len(), 4);
     }
+    test_sandbox.assert_quit().await;
+    Ok(())
+}
+
+fn collect_str_terms(response: LeafListTermsResponse) -> Vec<String> {
+    response
+        .terms
+        .into_iter()
+        .map(|term| Term::wrap(term).as_str().unwrap().to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn test_single_node_list_terms() -> anyhow::Result<()> {
+    let doc_mapping_yaml = r#"
+            field_mappings:
+              - name: title
+                type: text
+              - name: body
+                type: text
+              - name: url
+                type: text
+              - name: binary
+                type: bytes
+        "#;
+    let test_sandbox =
+        TestSandbox::create("single-node-list-terms", doc_mapping_yaml, "{}", &["body"]).await?;
+    let docs = vec![
+        json!({"title": "snoopy", "body": "Snoopy is an anthropomorphic beagle[5] in the comic strip...", "url": "http://snoopy", "binary": "dGhpcyBpcyBhIHRlc3Qu"}),
+        json!({"title": "beagle", "body": "The beagle is a breed of small scent hound, similar in appearance to the much larger foxhound.", "url": "http://beagle", "binary": "bWFkZSB5b3UgbG9vay4="}),
+    ];
+    test_sandbox.add_documents(docs).await.unwrap();
+
+    let splits = test_sandbox
+        .metastore()
+        .list_all_splits(test_sandbox.index_id())
+        .await
+        .unwrap();
+    let splits_offsets: Vec<_> = splits
+        .into_iter()
+        .map(|split_meta| SplitIdAndFooterOffsets {
+            split_id: split_meta.split_id().to_string(),
+            split_footer_start: split_meta.split_metadata.footer_offsets.start,
+            split_footer_end: split_meta.split_metadata.footer_offsets.end,
+        })
+        .collect();
+    let searcher_context = Arc::new(SearcherContext::new(SearcherConfig::default()));
+
+    {
+        let request = quickwit_proto::ListTermsRequest {
+            index_id: test_sandbox.index_id().to_string(),
+            field: "title".to_string(),
+            start_key: None,
+            end_key: None,
+            start_timestamp: None,
+            end_timestamp: None,
+            max_hits: Some(100),
+        };
+        let search_response = leaf_list_terms(
+            searcher_context.clone(),
+            &request,
+            test_sandbox.storage(),
+            &splits_offsets,
+        )
+        .await
+        .unwrap();
+        let terms = collect_str_terms(search_response);
+        assert_eq!(terms, &["beagle", "snoopy",]);
+    }
+    {
+        let request = quickwit_proto::ListTermsRequest {
+            index_id: test_sandbox.index_id().to_string(),
+            field: "title".to_string(),
+            start_key: None,
+            end_key: None,
+            start_timestamp: None,
+            end_timestamp: None,
+            max_hits: Some(1),
+        };
+        let search_response = leaf_list_terms(
+            searcher_context.clone(),
+            &request,
+            test_sandbox.storage(),
+            &splits_offsets,
+        )
+        .await
+        .unwrap();
+        let terms = collect_str_terms(search_response);
+        assert_eq!(terms, &["beagle"]);
+    }
+    {
+        let request = quickwit_proto::ListTermsRequest {
+            index_id: test_sandbox.index_id().to_string(),
+            field: "title".to_string(),
+            start_key: Some("casper".as_bytes().to_vec()),
+            end_key: None,
+            start_timestamp: None,
+            end_timestamp: None,
+            max_hits: Some(100),
+        };
+        let search_response = leaf_list_terms(
+            searcher_context.clone(),
+            &request,
+            test_sandbox.storage(),
+            &splits_offsets,
+        )
+        .await
+        .unwrap();
+        let terms = collect_str_terms(search_response);
+        assert_eq!(terms, &["snoopy"]);
+    }
+    {
+        let request = quickwit_proto::ListTermsRequest {
+            index_id: test_sandbox.index_id().to_string(),
+            field: "title".to_string(),
+            start_key: None,
+            end_key: Some("casper".as_bytes().to_vec()),
+            start_timestamp: None,
+            end_timestamp: None,
+            max_hits: Some(100),
+        };
+        let search_response = leaf_list_terms(
+            searcher_context.clone(),
+            &request,
+            test_sandbox.storage(),
+            &splits_offsets,
+        )
+        .await
+        .unwrap();
+        let terms = collect_str_terms(search_response);
+        assert_eq!(terms, &["beagle"]);
+    }
+    test_sandbox.assert_quit().await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_single_node_find_trace_ids_collector() -> anyhow::Result<()> {
+    let index_id = "single-node-find-trace-ids-collector";
+    let doc_mapping_yaml = r#"
+            field_mappings:
+              - name: trace_id
+                type: text
+                tokenizer: raw
+                fast: true
+              - name: span_timestamp_secs
+                type: datetime
+                fast: true
+                precision: seconds
+        "#;
+    let foo_trace_id = TraceId::new([1u8; 16]).b64_encode();
+    let bar_trace_id = TraceId::new([2u8; 16]).b64_encode();
+    let qux_trace_id = TraceId::new([3u8; 16]).b64_encode();
+    let baz_trace_id = TraceId::new([4u8; 16]).b64_encode();
+
+    let docs = vec![
+        json!({"trace_id": foo_trace_id.to_string(), "span_timestamp_secs": "2023-01-10T15:13:35Z"}),
+        json!({"trace_id": foo_trace_id.to_string(), "span_timestamp_secs": "2023-01-10T15:13:36Z"}),
+        json!({"trace_id": foo_trace_id.to_string(), "span_timestamp_secs": "2023-01-10T15:13:37Z"}),
+        json!({"trace_id": foo_trace_id.to_string(), "span_timestamp_secs": "2023-01-10T15:13:38Z"}),
+        json!({"trace_id": foo_trace_id.to_string(), "span_timestamp_secs": "2023-01-10T15:13:39Z"}),
+        json!({"trace_id": foo_trace_id.to_string(), "span_timestamp_secs": "2023-01-10T15:13:40Z"}),
+        json!({"trace_id": bar_trace_id.to_string(), "span_timestamp_secs": "2024-01-10T15:13:35Z"}),
+        json!({"trace_id": bar_trace_id.to_string(), "span_timestamp_secs": "2024-01-10T15:13:40Z"}),
+        json!({"trace_id": qux_trace_id.to_string(), "span_timestamp_secs": "2025-01-10T15:13:40Z"}),
+        json!({"trace_id": qux_trace_id.to_string(), "span_timestamp_secs": "2025-01-10T15:13:35Z"}),
+        json!({"trace_id": baz_trace_id.to_string(), "span_timestamp_secs": "2022-01-10T15:13:35Z"}),
+    ];
+    let test_sandbox = TestSandbox::create(index_id, doc_mapping_yaml, "{}", &[]).await?;
+    test_sandbox.add_documents(docs).await?;
+    {
+        let aggregations = r#"{
+            "num_traces": 3,
+            "trace_id_field_name": "trace_id",
+            "span_timestamp_field_name": "span_timestamp_secs"
+        }"#
+        .to_string();
+
+        let search_request = SearchRequest {
+            index_id: index_id.to_string(),
+            query: "*".to_string(),
+            aggregation_request: Some(aggregations),
+            search_fields: Vec::new(),
+            start_timestamp: None,
+            end_timestamp: None,
+            max_hits: 0,
+            start_offset: 0,
+            ..Default::default()
+        };
+        let single_node_result = single_node_search(
+            &search_request,
+            &*test_sandbox.metastore(),
+            test_sandbox.storage_uri_resolver(),
+        )
+        .await?;
+        let aggregation = single_node_result.aggregation.unwrap();
+        let trace_ids: Vec<Span> = serde_json::from_str(&aggregation).unwrap();
+        assert_eq!(trace_ids.len(), 3);
+
+        assert_eq!(trace_ids[0].trace_id, qux_trace_id);
+        assert_eq!(
+            trace_ids[0].span_timestamp.into_timestamp_secs(),
+            1736522020
+        );
+        assert_eq!(trace_ids[1].trace_id, bar_trace_id);
+        assert_eq!(
+            trace_ids[1].span_timestamp.into_timestamp_secs(),
+            1704899620
+        );
+        assert_eq!(trace_ids[2].trace_id, foo_trace_id);
+        assert_eq!(
+            trace_ids[2].span_timestamp.into_timestamp_secs(),
+            1673363620
+        );
+    }
+    test_sandbox.assert_quit().await;
     Ok(())
 }

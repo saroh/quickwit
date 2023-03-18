@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -23,6 +23,7 @@ mod rest_handler;
 pub use self::grpc_adapter::GrpcSearchAdapter;
 pub use self::rest_handler::{
     search_get_handler, search_post_handler, search_stream_handler, SearchApi,
+    SearchRequestQueryString, SortByField,
 };
 
 #[cfg(test)]
@@ -49,10 +50,10 @@ mod tests {
         address: SocketAddr,
         search_service: Arc<dyn SearchService>,
     ) -> anyhow::Result<()> {
-        let search_grpc_adpater = GrpcSearchAdapter::from(search_service);
+        let search_grpc_adapter = GrpcSearchAdapter::from(search_service);
         tokio::spawn(async move {
             Server::builder()
-                .add_service(SearchServiceServer::new(search_grpc_adpater))
+                .add_service(SearchServiceServer::new(search_grpc_adapter))
                 .serve(address)
                 .await?;
             Result::<_, anyhow::Error>::Ok(())

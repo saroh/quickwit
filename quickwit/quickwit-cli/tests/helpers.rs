@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -23,18 +23,22 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use predicates::str;
+use quickwit_cli::service::RunCliCommand;
 use quickwit_common::net::find_available_tcp_port;
+use quickwit_common::test_utils::wait_for_server_ready;
 use quickwit_common::uri::Uri;
 use quickwit_metastore::{FileBackedMetastore, IndexMetadata, Metastore, MetastoreResult};
 use quickwit_storage::{LocalFileStorage, S3CompatibleObjectStorage, Storage};
+use reqwest::Url;
 use tempfile::{tempdir, TempDir};
+use tracing::error;
 
 pub const PACKAGE_BIN_NAME: &str = "quickwit";
 
 const DEFAULT_INDEX_CONFIG: &str = r#"
-    version: 0.4
+    version: 0.5
 
     index_id: #index_id
     index_uri: #index_uri
@@ -74,7 +78,7 @@ const DEFAULT_INDEX_CONFIG: &str = r#"
 "#;
 
 const DEFAULT_QUICKWIT_CONFIG: &str = r#"
-    version: 0.4
+    version: 0.5
     metastore_uri: #metastore_uri
     data_dir: #data_dir
     rest_listen_port: #rest_listen_port
@@ -98,7 +102,7 @@ const WIKI_JSON_DOCS: &str = r#"{"body": "foo", "title": "shimroy", "url": "http
 pub async fn wait_port_ready(port: u16) -> anyhow::Result<()> {
     let timer_task = tokio::time::sleep(Duration::from_secs(10));
     let port_check_task = async {
-        while tokio::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+        while tokio::net::TcpStream::connect(format!("127.0.0.1:{port}"))
             .await
             .is_err()
         {
@@ -115,7 +119,7 @@ pub async fn wait_port_ready(port: u16) -> anyhow::Result<()> {
     }
 }
 
-/// A struct to hold few info about the test environement.
+/// A struct to hold few info about the test environment.
 pub struct TestEnv {
     /// The temporary directory of the test.
     _tempdir: TempDir,
@@ -128,6 +132,7 @@ pub struct TestEnv {
     /// The metastore URI.
     pub metastore_uri: Uri,
     pub config_uri: Uri,
+    pub cluster_endpoint: Url,
     pub index_config_uri: Uri,
     /// The index ID.
     pub index_id: String,
@@ -156,6 +161,20 @@ impl TestEnv {
             .await?;
         Ok(index_metadata)
     }
+
+    pub async fn start_server(&self) -> anyhow::Result<()> {
+        let run_command = RunCliCommand {
+            config_uri: self.config_uri.clone(),
+            services: None,
+        };
+        tokio::spawn(async move {
+            if let Err(error) = run_command.execute().await {
+                error!(err=?error, "Failed to start a quickwit server");
+            }
+        });
+        wait_for_server_ready(([127, 0, 0, 1], self.rest_listen_port).into()).await?;
+        Ok(())
+    }
 }
 
 pub enum TestStorageType {
@@ -163,7 +182,7 @@ pub enum TestStorageType {
     LocalFileSystem,
 }
 
-/// Creates all necessary artifacts in a test environement.
+/// Creates all necessary artifacts in a test environment.
 pub fn create_test_env(index_id: String, storage_type: TestStorageType) -> anyhow::Result<TestEnv> {
     let tempdir = tempdir()?;
     let data_dir_path = tempdir.path().join("data");
@@ -235,6 +254,8 @@ pub fn create_test_env(index_id: String, storage_type: TestStorageType) -> anyho
         "file://{}",
         resource_files["index_config"].display()
     ));
+    let cluster_endpoint = Url::parse(&format!("http://localhost:{rest_listen_port}"))
+        .context("Failed to parse cluster endpoint.")?;
 
     Ok(TestEnv {
         _tempdir: tempdir,
@@ -243,6 +264,7 @@ pub fn create_test_env(index_id: String, storage_type: TestStorageType) -> anyho
         resource_files,
         metastore_uri,
         config_uri,
+        cluster_endpoint,
         index_config_uri,
         index_id,
         index_uri,

@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -30,8 +30,8 @@ pub use index::{
 mod tests {
     use std::path::Path;
 
+    use quickwit_common::FileEntry;
     use quickwit_indexing::TestSandbox;
-    use quickwit_janitor::FileEntry;
     use quickwit_storage::StorageUriResolver;
 
     use crate::IndexService;
@@ -74,6 +74,7 @@ mod tests {
             IndexService::new(test_sandbox.metastore(), StorageUriResolver::for_test());
         let deleted_file_entries = index_service.delete_index(index_id, false).await?;
         assert_eq!(deleted_file_entries.len(), 1);
+        test_sandbox.assert_quit().await;
         Ok(())
     }
 }

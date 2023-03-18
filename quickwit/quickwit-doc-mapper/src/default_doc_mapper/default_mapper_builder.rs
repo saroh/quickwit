@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -71,20 +71,16 @@ pub struct DefaultDocMapperBuilder {
 /// `Mode` describing how the unmapped field should be handled.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum ModeType {
     /// Lenient mode: unmapped fields are just ignored.
+    #[default]
     Lenient,
     /// Strict mode: when parsing a document with an unmapped field, an error is yielded.
     Strict,
     /// Dynamic mode: unmapped fields are captured and handled according to the
     /// `dynamic_mapping` configuration.
     Dynamic,
-}
-
-impl Default for ModeType {
-    fn default() -> Self {
-        ModeType::Lenient
-    }
 }
 
 #[cfg(test)]

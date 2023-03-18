@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -19,9 +19,11 @@
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::hash::Hash;
 
 use itertools::Itertools;
 use quickwit_cluster::ClusterMember;
+use quickwit_common::rendezvous_hasher::sort_by_rendez_vous_hash;
 use quickwit_config::{SourceConfig, CLI_INGEST_SOURCE_ID, INGEST_API_SOURCE_ID};
 use quickwit_proto::indexing_api::IndexingTask;
 use serde::Serialize;
@@ -30,7 +32,7 @@ use serde::Serialize;
 /// each indexer, identified by its node ID, should run.
 /// TODO(fmassot): a metastore version number will be attached to the plan
 /// to identify if the plan is up to date with the metastore.
-#[derive(Debug, PartialEq, Clone, Serialize)]
+#[derive(Debug, PartialEq, Clone, Serialize, Default)]
 pub struct PhysicalIndexingPlan {
     indexing_tasks_per_node_id: HashMap<String, Vec<IndexingTask>>,
 }
@@ -44,6 +46,10 @@ impl PhysicalIndexingPlan {
         Self {
             indexing_tasks_per_node_id,
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.indexing_tasks_per_node_id.is_empty()
     }
 
     /// Returns the number of indexing tasks for the given node ID.
@@ -117,10 +123,70 @@ impl PhysicalIndexingPlan {
     }
 }
 
-#[derive(Debug)]
+/// Builds a [`PhysicalIndexingPlan`] by assigning each indexing tasks to a node ID.
+/// The algorithm first sort indexing tasks by (index_id, source_id).
+/// Then for each indexing tasks, it performs the following steps:
+/// 1. Sort node by rendez-vous hashing to make the assignment stable (it makes it
+///    deterministic too). This is not bullet proof as the node score has an impact
+///    on the assignment too.
+/// 2. Select node candidates that can run the task, see [`select_node_candidates`]
+///    function.
+/// 3. For each node, compute a score for this task, the higher, the better, see
+///    `compute_node_score` function.
+/// 4. Select the best node (highest score) and assign the task to
+///    this node.
+/// Additional notes(fmassot): it's nice to have the cluster members as they contain the running
+/// tasks. We can potentially use this info to assign an indexing task to a node running the same
+/// task.
+pub(crate) fn build_physical_indexing_plan(
+    indexers: &[ClusterMember],
+    source_configs: &HashMap<IndexSourceId, SourceConfig>,
+    mut indexing_tasks: Vec<IndexingTask>,
+) -> PhysicalIndexingPlan {
+    // Sort by (index_id, source_id) to make the algorithm deterministic.
+    indexing_tasks.sort_by(|left, right| {
+        (&left.index_id, &left.source_id).cmp(&(&right.index_id, &right.source_id))
+    });
+    let mut node_ids = indexers
+        .iter()
+        .map(|indexer| indexer.node_id.to_string())
+        .collect_vec();
+
+    // Build the plan.
+    let mut plan = PhysicalIndexingPlan::new(node_ids.clone());
+    for indexing_task in indexing_tasks {
+        sort_by_rendez_vous_hash(&mut node_ids, &indexing_task);
+        let source_config = source_configs
+            // TODO(fmassot): remove this lame allocation to access the source...
+            .get(&IndexSourceId::from(indexing_task.clone()))
+            .expect("SourceConfig should always be present.");
+        let candidates = select_node_candidates(&node_ids, &plan, source_config, &indexing_task);
+
+        // It's theoretically possible to have no candidate as all indexers can already
+        // have more than `max_num_pipelines_per_indexer` assigned for a given source.
+        // But, when building the list of indexing tasks to run on the cluster in
+        // `build_indexing_plan`, we make sure to always respect the constraint
+        // `max_num_pipelines_per_indexer` by limiting the number of indexing tasks per
+        // source.
+        let best_node_score_opt =
+            candidates
+            .iter()
+            .rev() //< we use the reverse iterator, because in case of a tie, max picks the last element.
+            // we want the first one in order to maximize affinity.
+            .map(|&node_id| NodeScore { node_id, score: compute_node_score(node_id, &plan) })
+            .max();
+        if let Some(best_node_score) = best_node_score_opt {
+            plan.assign_indexing_task(best_node_score.node_id.to_string(), indexing_task);
+        } else {
+            tracing::warn!(indexing_task=?indexing_task, "No indexer candidate available for the indexing task, cannot assign it to an indexer. This should not happen.");
+        };
+    }
+    plan
+}
+
 struct NodeScore<'a> {
-    pub node_id: &'a str,
-    pub score: f32,
+    node_id: &'a str,
+    score: f32,
 }
 
 impl<'a> PartialEq for NodeScore<'a> {
@@ -140,74 +206,8 @@ impl<'a> PartialOrd for NodeScore<'a> {
 
 impl<'a> Ord for NodeScore<'a> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Score is never NaN.
         self.partial_cmp(other).unwrap_or(Ordering::Equal)
     }
-}
-
-/// Builds a [`PhysicalIndexingPlan`] by assigning each indexing tasks to a node ID.
-/// The algorithm first sort indexing tasks by (index_id, source_id) and sort indexers
-/// by node ID to make the algorithm deterministic.
-/// Then for each indexing tasks, it performs the following steps:
-/// 1. Select node candidates that can run the task, see [`select_node_candidates`]
-///    function.
-/// 2. For each node, compute a score for this task, the higher, the better, see
-///    `compute_node_score` function.
-/// 3. Select the best node (highest score) and assign the task to
-///    this node.
-/// Additional notes(fmassot): it's nice to have the cluster members as they contain the running
-/// tasks. We can potentially use this info to assign an indexing task to a node running the same
-/// task.
-pub(crate) fn build_physical_indexing_plan(
-    indexers: &[ClusterMember],
-    source_configs: &HashMap<IndexSourceId, SourceConfig>,
-    mut indexing_tasks: Vec<IndexingTask>,
-) -> PhysicalIndexingPlan {
-    // Sort by (index_id, source_id)...
-    indexing_tasks.sort_by(|left, right| {
-        (&left.index_id, &left.source_id).cmp(&(&right.index_id, &right.source_id))
-    });
-    // ...and sort by node ID to make the algorithm deterministic.
-    let node_ids = indexers
-        .iter()
-        .map(|indexer| indexer.node_id.to_string())
-        .sorted()
-        .collect_vec();
-
-    // Build the plan.
-    let mut plan = PhysicalIndexingPlan::new(node_ids.clone());
-    for indexing_task in indexing_tasks {
-        // Get candidates.
-        let source_config = source_configs
-            // TODO(fmassot): remove this lame allocation to access the source...
-            .get(&IndexSourceId::from(indexing_task.clone()))
-            .expect("SourceConfig should always be present.");
-        let candidates = select_node_candidates(&node_ids, &plan, source_config, &indexing_task);
-
-        // It's theoritically possible to have no candidate as all indexers can already
-        // have more than `max_num_pipelines_per_indexer` assigned for a given source.
-        // But, when building the list of indexing tasks to run on the cluster in
-        // `build_indexing_plan`, we make sure to always respect the constraint
-        // `max_num_pipelines_per_indexer` by limiting the number of indexing tasks per
-        // source.
-        let best_node_opt: Option<&str> = candidates
-            .iter()
-            // NodeScore implements Ord and can be used easily for sorting.
-            .map(|node_id| NodeScore {
-                node_id,
-                score: -compute_node_score(node_id, &plan),
-            })
-            .sorted()
-            .next()
-            .map(|node_score| node_score.node_id);
-        if let Some(best_node) = best_node_opt {
-            plan.assign_indexing_task(best_node.to_string(), indexing_task);
-        } else {
-            tracing::warn!(indexing_task=?indexing_task, "No indexer candidate available for the indexing task, cannot assign it to an indexer. This should not happen.");
-        };
-    }
-
-    plan
 }
 
 /// Returns node candidates IDs that can run the given [`IndexingTask`].
@@ -228,7 +228,7 @@ fn select_node_candidates<'a>(
                 node_id,
                 &indexing_task.index_id,
                 &indexing_task.source_id,
-            ) < source_config.max_num_pipelines_per_indexer()
+            ) < source_config.max_num_pipelines_per_indexer.get()
         })
         .collect_vec()
 }
@@ -295,8 +295,8 @@ pub(crate) fn build_indexing_plan(
             // The num desired pipelines is constrained by the number of indexer and the maximum
             // of pipelines that can run on each indexer.
             std::cmp::min(
-                source_config.desired_num_pipelines(),
-                source_config.max_num_pipelines_per_indexer() * indexers.len(),
+                source_config.desired_num_pipelines.get(),
+                source_config.max_num_pipelines_per_indexer.get() * indexers.len(),
             )
         };
         for _ in 0..num_pipelines {
@@ -313,6 +313,7 @@ pub(crate) fn build_indexing_plan(
 mod tests {
     use std::collections::{HashMap, HashSet};
     use std::net::SocketAddr;
+    use std::num::NonZeroUsize;
 
     use itertools::Itertools;
     use proptest::prelude::*;
@@ -349,12 +350,12 @@ mod tests {
         for idx in 0..num_members {
             let addr: SocketAddr = ([127, 0, 0, 1], 10).into();
             members.push(ClusterMember::new(
-                idx.to_string(),
+                (1 + idx).to_string(),
                 0,
                 HashSet::from_iter([quickwit_service].into_iter()),
                 addr,
                 addr,
-                None,
+                Vec::new(),
             ))
         }
         members
@@ -368,8 +369,8 @@ mod tests {
             .iter()
             .map(|(_, source_config)| {
                 std::cmp::min(
-                    num_indexers * source_config.max_num_pipelines_per_indexer(),
-                    source_config.desired_num_pipelines(),
+                    num_indexers * source_config.max_num_pipelines_per_indexer.get(),
+                    source_config.desired_num_pipelines.get(),
                 )
             })
             .sum()
@@ -387,8 +388,8 @@ mod tests {
             index_source_id.clone(),
             SourceConfig {
                 source_id: index_source_id.source_id.to_string(),
-                max_num_pipelines_per_indexer: 1,
-                desired_num_pipelines: 3,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(3).unwrap(),
                 enabled: true,
                 source_params: kafka_source_params_for_test(),
                 transform_config: None,
@@ -421,8 +422,8 @@ mod tests {
             index_source_id.clone(),
             SourceConfig {
                 source_id: index_source_id.source_id.to_string(),
-                max_num_pipelines_per_indexer: 1,
-                desired_num_pipelines: 3,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(3).unwrap(),
                 enabled: true,
                 source_params: SourceParams::IngestApi,
                 transform_config: None,
@@ -463,8 +464,8 @@ mod tests {
             file_index_source_id.clone(),
             SourceConfig {
                 source_id: file_index_source_id.source_id,
-                max_num_pipelines_per_indexer: 1,
-                desired_num_pipelines: 3,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(3).unwrap(),
                 enabled: true,
                 source_params: SourceParams::File(FileSourceParams { filepath: None }),
                 transform_config: None,
@@ -474,8 +475,8 @@ mod tests {
             cli_ingest_index_source_id.clone(),
             SourceConfig {
                 source_id: cli_ingest_index_source_id.source_id,
-                max_num_pipelines_per_indexer: 1,
-                desired_num_pipelines: 3,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(3).unwrap(),
                 enabled: true,
                 source_params: SourceParams::IngestCli,
                 transform_config: None,
@@ -485,8 +486,8 @@ mod tests {
             kafka_index_source_id.clone(),
             SourceConfig {
                 source_id: kafka_index_source_id.source_id,
-                max_num_pipelines_per_indexer: 1,
-                desired_num_pipelines: 3,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(3).unwrap(),
                 enabled: false,
                 source_params: kafka_source_params_for_test(),
                 transform_config: None,
@@ -500,10 +501,12 @@ mod tests {
     #[test]
     fn test_build_physical_indexing_plan_simple() {
         quickwit_common::setup_logging_for_tests();
-        let index_1 = "test-indexing-plan-1";
-        let source_1 = "source-1";
-        let index_2 = "test-indexing-plan-2";
-        let source_2 = "source-2";
+        // Rdv hashing for (index 1, source) returns [node 2, node 1].
+        let index_1 = "1";
+        let source_1 = "1";
+        // Rdv hashing for (index 2, source) returns [node 1, node 2].
+        let index_2 = "2";
+        let source_2 = "0";
         let mut source_configs_map = HashMap::new();
         let kafka_index_source_id_1 = IndexSourceId {
             index_id: index_1.to_string(),
@@ -517,8 +520,8 @@ mod tests {
             kafka_index_source_id_1.clone(),
             SourceConfig {
                 source_id: kafka_index_source_id_1.source_id,
-                max_num_pipelines_per_indexer: 2,
-                desired_num_pipelines: 4,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(2).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(4).unwrap(),
                 enabled: true,
                 source_params: kafka_source_params_for_test(),
                 transform_config: None,
@@ -528,15 +531,15 @@ mod tests {
             kafka_index_source_id_2.clone(),
             SourceConfig {
                 source_id: kafka_index_source_id_2.source_id,
-                max_num_pipelines_per_indexer: 1,
-                desired_num_pipelines: 2,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(2).unwrap(),
                 enabled: true,
                 source_params: kafka_source_params_for_test(),
                 transform_config: None,
             },
         );
         let mut indexing_tasks = Vec::new();
-        for _ in 0..4 {
+        for _ in 0..3 {
             indexing_tasks.push(IndexingTask {
                 index_id: index_1.to_string(),
                 source_id: source_1.to_string(),
@@ -561,18 +564,21 @@ mod tests {
             .indexing_tasks_per_node_id
             .get(&indexers[1].node_id)
             .unwrap();
+        // (index 1, source) tasks are first placed on indexer 2 by rdv hashing.
+        // Thus task 0 => indexer 2, task 1 => indexer 1, task 2 => indexer 2, task 3 => indexer 1.
         let expected_indexer_1_tasks = indexing_tasks
             .iter()
             .cloned()
             .enumerate()
-            .filter(|(idx, _)| idx % 2 == 0)
+            .filter(|(idx, _)| idx % 2 == 1)
             .map(|(_, task)| task)
             .collect_vec();
         assert_eq!(indexer_1_tasks, &expected_indexer_1_tasks);
+        // (index 1, source) tasks are first placed on node 1 by rdv hashing.
         let expected_indexer_2_tasks = indexing_tasks
             .into_iter()
             .enumerate()
-            .filter(|(idx, _)| idx % 2 != 0)
+            .filter(|(idx, _)| idx % 2 == 0)
             .map(|(_, task)| task)
             .collect_vec();
         assert_eq!(indexer_2_tasks, &expected_indexer_2_tasks);
@@ -592,8 +598,8 @@ mod tests {
             kafka_index_source_id_1.clone(),
             SourceConfig {
                 source_id: kafka_index_source_id_1.source_id,
-                max_num_pipelines_per_indexer: 1,
-                desired_num_pipelines: 2,
+                max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+                desired_num_pipelines: NonZeroUsize::new(2).unwrap(),
                 enabled: true,
                 source_params: kafka_source_params_for_test(),
                 transform_config: None,
@@ -648,13 +654,13 @@ mod tests {
 
     prop_compose! {
       fn gen_kafka_source()
-        (index_idx in 0usize..100usize, desired_num_pipelines in 0usize..50usize, max_num_pipelines_per_indexer in 0usize..4usize) -> (String, SourceConfig) {
+        (index_idx in 0usize..100usize, desired_num_pipelines in 1usize..51usize, max_num_pipelines_per_indexer in 1usize..5usize) -> (String, SourceConfig) {
           let index_id = format!("index-id-{index_idx}");
           let source_id = append_random_suffix("kafka-source");
           (index_id, SourceConfig {
               source_id,
-              desired_num_pipelines,
-              max_num_pipelines_per_indexer,
+              desired_num_pipelines: NonZeroUsize::new(desired_num_pipelines).unwrap(),
+              max_num_pipelines_per_indexer: NonZeroUsize::new(max_num_pipelines_per_indexer).unwrap(),
               enabled: true,
               source_params: kafka_source_params_for_test(),
               transform_config: None,

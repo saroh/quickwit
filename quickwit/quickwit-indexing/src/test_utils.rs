@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -17,6 +17,7 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
@@ -26,10 +27,11 @@ use quickwit_cluster::create_cluster_for_test;
 use quickwit_common::rand::append_random_suffix;
 use quickwit_common::uri::{Protocol, Uri};
 use quickwit_config::{
-    build_doc_mapper, ConfigFormat, IndexConfig, IndexerConfig, SourceConfig, SourceParams,
-    VecSourceParams,
+    build_doc_mapper, ConfigFormat, IndexConfig, IndexerConfig, IngestApiConfig, SourceConfig,
+    SourceParams, VecSourceParams,
 };
 use quickwit_doc_mapper::DocMapper;
+use quickwit_ingest_api::{init_ingest_api, QUEUES_DIR_NAME};
 use quickwit_metastore::file_backed_metastore::FileBackedMetastoreFactory;
 use quickwit_metastore::{Metastore, MetastoreUriResolver, Split, SplitMetadata, SplitState};
 use quickwit_storage::{Storage, StorageUriResolver};
@@ -51,7 +53,7 @@ pub struct TestSandbox {
     storage_resolver: StorageUriResolver,
     storage: Arc<dyn Storage>,
     add_docs_id: AtomicUsize,
-    _universe: Universe,
+    universe: Universe,
     _temp_dir: tempfile::TempDir,
 }
 
@@ -102,12 +104,16 @@ impl TestSandbox {
         metastore.create_index(index_config.clone()).await?;
         let storage = storage_resolver.resolve(&index_uri)?;
         let universe = Universe::with_accelerated_time();
+        let queues_dir_path = temp_dir.path().join(QUEUES_DIR_NAME);
+        let ingest_api_service =
+            init_ingest_api(&universe, &queues_dir_path, &IngestApiConfig::default()).await?;
         let indexing_service_actor = IndexingService::new(
             node_id.to_string(),
             temp_dir.path().to_path_buf(),
             indexer_config,
             cluster,
             metastore.clone(),
+            Some(ingest_api_service),
             storage_resolver.clone(),
         )
         .await?;
@@ -121,7 +127,7 @@ impl TestSandbox {
             storage_resolver,
             storage,
             add_docs_id: AtomicUsize::default(),
-            _universe: universe,
+            universe,
             _temp_dir: temp_dir,
         })
     }
@@ -142,13 +148,13 @@ impl TestSandbox {
         let add_docs_id = self.add_docs_id.fetch_add(1, Ordering::SeqCst);
         let source_config = SourceConfig {
             source_id: self.index_id.clone(),
-            max_num_pipelines_per_indexer: 0,
-            desired_num_pipelines: 1,
+            max_num_pipelines_per_indexer: NonZeroUsize::new(1).unwrap(),
+            desired_num_pipelines: NonZeroUsize::new(1).unwrap(),
             enabled: true,
             source_params: SourceParams::Vec(VecSourceParams {
                 docs,
                 batch_num_docs: 10,
-                partition: format!("add-docs-{}", add_docs_id),
+                partition: format!("add-docs-{add_docs_id}"),
             }),
             transform_config: None,
         };
@@ -198,6 +204,20 @@ impl TestSandbox {
     pub fn index_id(&self) -> &str {
         &self.index_id
     }
+
+    /// Returns the underlying universe.
+    pub fn universe(&self) -> &Universe {
+        &self.universe
+    }
+
+    /// Gracefully quits all registered actors in the underlying universe and asserts that none of
+    /// them panicked.
+    ///
+    /// This is useful for testing purposes to detect failed asserts in actors
+    #[cfg(any(test, feature = "testsuite"))]
+    pub async fn assert_quit(self) {
+        self.universe.assert_quit().await
+    }
 }
 
 /// Mock split helper.
@@ -217,7 +237,7 @@ pub fn mock_split_meta(split_id: &str) -> SplitMetadata {
         partition_id: 13u64,
         num_docs: 10,
         uncompressed_docs_size_in_bytes: 256,
-        time_range: None,
+        time_range: Some(121000..=130198),
         create_timestamp: 0,
         footer_offsets: 700..800,
         ..Default::default()
@@ -259,6 +279,7 @@ mod tests {
             let splits = metastore.list_all_splits("test_index").await?;
             assert_eq!(splits.len(), 2);
         }
+        test_sandbox.assert_quit().await;
         Ok(())
     }
 }

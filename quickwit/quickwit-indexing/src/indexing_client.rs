@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -19,6 +19,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use quickwit_actors::Mailbox;
@@ -118,7 +119,9 @@ pub async fn create_indexing_service_client(
         .authority(grpc_addr.to_string().as_str())
         .path_and_query("/")
         .build()?;
-    let channel = Endpoint::from(uri).connect_lazy();
+    let channel = Endpoint::from(uri)
+        .connect_timeout(Duration::from_secs(5))
+        .connect_lazy();
     let client = IndexingServiceClient::from_grpc_client(
         quickwit_proto::indexing_api::indexing_service_client::IndexingServiceClient::new(channel),
         grpc_addr,

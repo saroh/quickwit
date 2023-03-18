@@ -1,4 +1,4 @@
-// Copyright (C) 2022 Quickwit, Inc.
+// Copyright (C) 2023 Quickwit, Inc.
 //
 // Quickwit is offered under the AGPL v3.0 and as commercial software.
 // For commercial licensing, contact us at hello@quickwit.io.
@@ -482,6 +482,7 @@ mod tests {
         assert_eq!(pipeline_statistics.num_spawn_attempts, 1);
         assert_eq!(pipeline_statistics.num_published_splits, 0);
         assert!(matches!(pipeline_exit_status, ActorExitStatus::Quit));
+        universe.assert_quit().await;
         Ok(())
     }
 }
