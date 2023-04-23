@@ -27,8 +27,8 @@ use base64::prelude::{Engine, BASE64_STANDARD};
 use itertools::Itertools;
 use serde_json::Value as JsonValue;
 use tantivy::schema::{
-    BytesOptions, Cardinality, Field, IntoIpv6Addr, IpAddrOptions, JsonObjectOptions,
-    NumericOptions, SchemaBuilder, TextOptions, Value as TantivyValue,
+    BytesOptions, Field, IntoIpv6Addr, IpAddrOptions, JsonObjectOptions, NumericOptions,
+    SchemaBuilder, TextOptions, Value as TantivyValue,
 };
 use tantivy::{DateOptions, Document};
 use tracing::warn;
@@ -38,7 +38,7 @@ use crate::default_doc_mapper::field_mapping_entry::{
     QuickwitIpAddrOptions, QuickwitNumericOptions, QuickwitObjectOptions, QuickwitTextOptions,
 };
 use crate::default_doc_mapper::{FieldMappingType, QuickwitJsonOptions};
-use crate::{DocParsingError, FieldMappingEntry, ModeType};
+use crate::{Cardinality, DocParsingError, FieldMappingEntry, ModeType};
 
 #[derive(Clone, Debug)]
 pub enum LeafType {
@@ -54,20 +54,6 @@ pub enum LeafType {
 }
 
 impl LeafType {
-    pub fn is_single_value_fast_field(&self) -> bool {
-        match self {
-            LeafType::Text(_) => false, // Text is always multivalue
-            LeafType::I64(opt)
-            | LeafType::U64(opt)
-            | LeafType::F64(opt)
-            | LeafType::Bool(opt)
-            | LeafType::Bytes(opt) => opt.fast,
-            LeafType::IpAddr(opt) => opt.fast,
-            LeafType::DateTime(opt) => opt.fast,
-            LeafType::Json(_) => false,
-        }
-    }
-
     fn value_from_json(&self, json_val: JsonValue) -> Result<TantivyValue, String> {
         match self {
             LeafType::Text(_) => {
@@ -176,10 +162,6 @@ impl MappingLeaf {
         {
             insert_json_val(field_path, json_val, doc_json);
         }
-    }
-
-    pub fn field(&self) -> Field {
-        self.field
     }
 
     pub fn get_type(&self) -> &LeafType {
@@ -321,13 +303,6 @@ impl MappingNode {
     #[cfg(test)]
     pub fn num_fields(&self) -> usize {
         self.branches.len()
-    }
-
-    /// Returns an iterator over the tree child.
-    ///
-    /// The returned child are not ordered.
-    pub fn children(&self) -> impl Iterator<Item = &MappingTree> {
-        self.branches.values()
     }
 
     pub fn insert(&mut self, path: &str, node: MappingTree) {
@@ -505,10 +480,7 @@ fn build_mapping_tree_from_entries<'a>(
     Ok(mapping_node)
 }
 
-fn get_numeric_options(
-    quickwit_numeric_options: &QuickwitNumericOptions,
-    cardinality: Cardinality,
-) -> NumericOptions {
+fn get_numeric_options(quickwit_numeric_options: &QuickwitNumericOptions) -> NumericOptions {
     let mut numeric_options = NumericOptions::default();
     if quickwit_numeric_options.stored {
         numeric_options = numeric_options.set_stored();
@@ -517,15 +489,12 @@ fn get_numeric_options(
         numeric_options = numeric_options.set_indexed();
     }
     if quickwit_numeric_options.fast {
-        numeric_options = numeric_options.set_fast(cardinality);
+        numeric_options = numeric_options.set_fast();
     }
     numeric_options
 }
 
-fn get_date_time_options(
-    quickwit_date_time_options: &QuickwitDateTimeOptions,
-    cardinality: Cardinality,
-) -> DateOptions {
+fn get_date_time_options(quickwit_date_time_options: &QuickwitDateTimeOptions) -> DateOptions {
     let mut date_time_options = DateOptions::default();
     if quickwit_date_time_options.stored {
         date_time_options = date_time_options.set_stored();
@@ -534,7 +503,7 @@ fn get_date_time_options(
         date_time_options = date_time_options.set_indexed();
     }
     if quickwit_date_time_options.fast {
-        date_time_options = date_time_options.set_fast(cardinality);
+        date_time_options = date_time_options.set_fast();
     }
     date_time_options.set_precision(quickwit_date_time_options.precision)
 }
@@ -553,10 +522,7 @@ fn get_bytes_options(quickwit_numeric_options: &QuickwitNumericOptions) -> Bytes
     bytes_options
 }
 
-fn get_ip_address_options(
-    quickwit_ip_address_options: &QuickwitIpAddrOptions,
-    cardinality: Cardinality,
-) -> IpAddrOptions {
+fn get_ip_address_options(quickwit_ip_address_options: &QuickwitIpAddrOptions) -> IpAddrOptions {
     let mut ip_address_options = IpAddrOptions::default();
     if quickwit_ip_address_options.stored {
         ip_address_options = ip_address_options.set_stored();
@@ -565,7 +531,7 @@ fn get_ip_address_options(
         ip_address_options = ip_address_options.set_indexed();
     }
     if quickwit_ip_address_options.fast {
-        ip_address_options = ip_address_options.set_fast(cardinality);
+        ip_address_options = ip_address_options.set_fast();
     }
     ip_address_options
 }
@@ -612,7 +578,7 @@ fn build_mapping_from_field_type<'a>(
             Ok(MappingTree::Leaf(mapping_leaf))
         }
         FieldMappingType::I64(options, cardinality) => {
-            let numeric_options = get_numeric_options(options, *cardinality);
+            let numeric_options = get_numeric_options(options);
             let field = schema_builder.add_i64_field(&field_name, numeric_options);
             let mapping_leaf = MappingLeaf {
                 field,
@@ -622,7 +588,7 @@ fn build_mapping_from_field_type<'a>(
             Ok(MappingTree::Leaf(mapping_leaf))
         }
         FieldMappingType::U64(options, cardinality) => {
-            let numeric_options = get_numeric_options(options, *cardinality);
+            let numeric_options = get_numeric_options(options);
             let field = schema_builder.add_u64_field(&field_name, numeric_options);
             let mapping_leaf = MappingLeaf {
                 field,
@@ -632,7 +598,7 @@ fn build_mapping_from_field_type<'a>(
             Ok(MappingTree::Leaf(mapping_leaf))
         }
         FieldMappingType::F64(options, cardinality) => {
-            let numeric_options = get_numeric_options(options, *cardinality);
+            let numeric_options = get_numeric_options(options);
             let field = schema_builder.add_f64_field(&field_name, numeric_options);
             let mapping_leaf = MappingLeaf {
                 field,
@@ -642,7 +608,7 @@ fn build_mapping_from_field_type<'a>(
             Ok(MappingTree::Leaf(mapping_leaf))
         }
         FieldMappingType::Bool(options, cardinality) => {
-            let numeric_options = get_numeric_options(options, *cardinality);
+            let numeric_options = get_numeric_options(options);
             let field = schema_builder.add_bool_field(&field_name, numeric_options);
             let mapping_leaf = MappingLeaf {
                 field,
@@ -652,7 +618,7 @@ fn build_mapping_from_field_type<'a>(
             Ok(MappingTree::Leaf(mapping_leaf))
         }
         FieldMappingType::IpAddr(options, cardinality) => {
-            let ip_addr_options = get_ip_address_options(options, *cardinality);
+            let ip_addr_options = get_ip_address_options(options);
             let field = schema_builder.add_ip_addr_field(&field_name, ip_addr_options);
             let mapping_leaf = MappingLeaf {
                 field,
@@ -662,7 +628,7 @@ fn build_mapping_from_field_type<'a>(
             Ok(MappingTree::Leaf(mapping_leaf))
         }
         FieldMappingType::DateTime(options, cardinality) => {
-            let date_time_options = get_date_time_options(options, *cardinality);
+            let date_time_options = get_date_time_options(options);
             let field = schema_builder.add_date_field(&field_name, date_time_options);
             let mapping_leaf = MappingLeaf {
                 field,
@@ -706,7 +672,7 @@ mod tests {
     use std::net::IpAddr;
 
     use serde_json::{json, Value as JsonValue};
-    use tantivy::schema::{Cardinality, Field, IntoIpv6Addr, Value as TantivyValue};
+    use tantivy::schema::{Field, IntoIpv6Addr, Value as TantivyValue};
     use tantivy::{DateTime, Document};
     use time::macros::datetime;
 
@@ -715,6 +681,7 @@ mod tests {
     use crate::default_doc_mapper::field_mapping_entry::{
         QuickwitIpAddrOptions, QuickwitNumericOptions, QuickwitTextOptions,
     };
+    use crate::Cardinality;
 
     #[test]
     fn test_field_name_from_field_path() {

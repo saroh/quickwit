@@ -25,18 +25,18 @@ use itertools::Itertools;
 use quickwit_doc_mapper::{DocMapper, WarmupInfo};
 use quickwit_proto::{LeafSearchResponse, PartialHit, SearchRequest, SortOrder};
 use serde::Deserialize;
-use tantivy::aggregation::agg_req::{
-    get_fast_field_names, get_term_dict_field_names, Aggregations,
-};
+use tantivy::aggregation::agg_req::{get_fast_field_names, Aggregations};
 use tantivy::aggregation::intermediate_agg_result::IntermediateAggregationResults;
-use tantivy::aggregation::AggregationSegmentCollector;
+use tantivy::aggregation::{AggregationLimits, AggregationSegmentCollector};
 use tantivy::collector::{Collector, SegmentCollector};
+use tantivy::columnar::ColumnType;
 use tantivy::fastfield::Column;
 use tantivy::{DocId, Score, SegmentOrdinal, SegmentReader};
 
 use crate::filters::{create_timestamp_filter_builder, TimestampFilter, TimestampFilterBuilder};
 use crate::find_trace_ids_collector::{FindTraceIdsCollector, FindTraceIdsSegmentCollector};
 use crate::partial_hit_sorting_key;
+use crate::service::SearcherContext;
 
 #[derive(Clone, Debug)]
 pub(crate) enum SortBy {
@@ -56,7 +56,7 @@ enum SortingFieldComputer {
     /// If undefined, we simply sort by DocIds.
     DocId,
     FastField {
-        fast_field_reader: Arc<dyn Column<u64>>,
+        sort_column: Column<u64>,
         order: SortOrder,
     },
     Score {
@@ -69,19 +69,22 @@ impl SortingFieldComputer {
     fn compute_sorting_field(&self, doc_id: DocId, score: Score) -> u64 {
         match self {
             SortingFieldComputer::FastField {
-                fast_field_reader,
+                sort_column: fast_field_reader,
                 order,
             } => {
-                let field_val = fast_field_reader.get_val(doc_id);
-                match order {
-                    // Descending is our most common case.
-                    SortOrder::Desc => field_val,
-                    // We get Ascending order by using a decreasing mapping over u64 as the
-                    // sorting_field.
-                    SortOrder::Asc => u64::MAX - field_val,
+                if let Some(field_val) = fast_field_reader.first(doc_id) {
+                    match order {
+                        // Descending is our most common case.
+                        SortOrder::Desc => field_val,
+                        // We get Ascending order by using a decreasing mapping over u64 as the
+                        // sorting_field.
+                        SortOrder::Asc => u64::MAX - field_val,
+                    }
+                } else {
+                    0u64
                 }
             }
-            SortingFieldComputer::DocId => 0u64,
+            SortingFieldComputer::DocId => doc_id as u64,
             SortingFieldComputer::Score { order } => {
                 let u64_score = f32_to_u64(score);
                 match order {
@@ -111,9 +114,15 @@ fn resolve_sort_by(
     match sort_by {
         SortBy::DocId => Ok(SortingFieldComputer::DocId),
         SortBy::FastField { field_name, order } => {
-            let fast_field_reader = segment_reader.fast_fields().u64_lenient(field_name)?;
+            let sort_column_opt: Option<(Column<u64>, ColumnType)> =
+                segment_reader.fast_fields().u64_lenient(field_name)?;
+            let sort_column = if let Some((sort_column, _column_type)) = sort_column_opt {
+                sort_column
+            } else {
+                Column::build_empty_column(segment_reader.max_doc())
+            };
             Ok(SortingFieldComputer::FastField {
-                fast_field_reader,
+                sort_column,
                 order: *order,
             })
         }
@@ -163,7 +172,7 @@ impl PartialEq for PartialHitHeapItem {
 impl Eq for PartialHitHeapItem {}
 
 enum AggregationSegmentCollectors {
-    FindTraceIdsSegmentCollector(FindTraceIdsSegmentCollector),
+    FindTraceIdsSegmentCollector(Box<FindTraceIdsSegmentCollector>),
     TantivyAggregationSegmentCollector(AggregationSegmentCollector),
 }
 
@@ -180,10 +189,12 @@ pub struct QuickwitSegmentCollector {
 }
 
 impl QuickwitSegmentCollector {
+    #[inline]
     fn at_capacity(&self) -> bool {
         self.hits.len() >= self.max_hits
     }
 
+    #[inline]
     fn collect_top_k(&mut self, doc_id: DocId, score: Score) {
         let sorting_field_value: u64 = self.sort_by.compute_sorting_field(doc_id, score);
         if self.at_capacity() {
@@ -207,6 +218,7 @@ impl QuickwitSegmentCollector {
         }
     }
 
+    #[inline]
     fn accept_document(&self, doc_id: DocId) -> bool {
         if let Some(ref timestamp_filter) = self.timestamp_filter_opt {
             return timestamp_filter.is_within_range(doc_id);
@@ -218,6 +230,7 @@ impl QuickwitSegmentCollector {
 impl SegmentCollector for QuickwitSegmentCollector {
     type Fruit = tantivy::Result<LeafSearchResponse>;
 
+    #[inline]
     fn collect(&mut self, doc_id: DocId, score: Score) {
         if !self.accept_document(doc_id) {
             return;
@@ -270,7 +283,7 @@ impl SegmentCollector for QuickwitSegmentCollector {
             intermediate_aggregation_result,
             num_hits: self.num_hits,
             partial_hits,
-            failed_splits: vec![],
+            failed_splits: Vec::new(),
             num_attempted_splits: 1,
         })
     }
@@ -298,17 +311,6 @@ impl QuickwitAggregations {
             }
         }
     }
-
-    fn term_dict_field_names(&self) -> HashSet<String> {
-        match self {
-            QuickwitAggregations::FindTraceIdsAggregation(collector) => {
-                collector.term_dict_field_names()
-            }
-            QuickwitAggregations::TantivyAggregations(aggregations) => {
-                get_term_dict_field_names(aggregations)
-            }
-        }
-    }
 }
 
 /// The quickwit collector is the tantivy Collector used in Quickwit.
@@ -323,6 +325,7 @@ pub(crate) struct QuickwitCollector {
     pub sort_by: SortBy,
     timestamp_filter_builder_opt: Option<TimestampFilterBuilder>,
     pub aggregation: Option<QuickwitAggregations>,
+    pub aggregation_limits: AggregationLimits,
 }
 
 impl QuickwitCollector {
@@ -343,25 +346,15 @@ impl QuickwitCollector {
         fast_field_names
     }
 
-    pub fn term_dict_field_names(&self) -> HashSet<String> {
-        let mut term_dict_field_names = HashSet::default();
-        if let Some(aggregations) = &self.aggregation {
-            term_dict_field_names.extend(aggregations.term_dict_field_names());
-        }
-        term_dict_field_names
-    }
-
     pub fn warmup_info(&self) -> WarmupInfo {
         WarmupInfo {
-            term_dict_field_names: self.term_dict_field_names(),
+            term_dict_field_names: Default::default(),
             fast_field_names: self.fast_field_names(),
             field_norms: self.requires_scoring(),
             ..WarmupInfo::default()
         }
     }
 }
-
-const AGGREGATION_BUCKET_LIMIT: u32 = 1_000_000;
 
 impl Collector for QuickwitCollector {
     type Child = QuickwitSegmentCollector;
@@ -384,7 +377,7 @@ impl Collector for QuickwitCollector {
         let aggregation = match &self.aggregation {
             Some(QuickwitAggregations::FindTraceIdsAggregation(collector)) => {
                 Some(AggregationSegmentCollectors::FindTraceIdsSegmentCollector(
-                    collector.for_segment(0, segment_reader)?,
+                    Box::new(collector.for_segment(0, segment_reader)?),
                 ))
             }
             Some(QuickwitAggregations::TantivyAggregations(aggs)) => Some(
@@ -392,7 +385,7 @@ impl Collector for QuickwitCollector {
                     AggregationSegmentCollector::from_agg_req_and_reader(
                         aggs,
                         segment_reader,
-                        AGGREGATION_BUCKET_LIMIT,
+                        &self.aggregation_limits,
                     )?,
                 ),
             ),
@@ -484,14 +477,16 @@ fn merge_leaf_responses(
                 })
                 .collect::<Result<_, _>>()?;
 
-            fruits
-                .into_iter()
-                .reduce(|mut left, right| {
-                    left.merge_fruits(right);
-                    left
-                })
-                .map(|merged_fruit| serde_json::to_string(&merged_fruit))
-                .transpose()?
+            let mut fruit_iter = fruits.into_iter();
+            if let Some(first_fruit) = fruit_iter.next() {
+                let mut merged_fruit = first_fruit;
+                for fruit in fruit_iter {
+                    merged_fruit.merge_fruits(fruit)?;
+                }
+                Some(serde_json::to_string(&merged_fruit)?)
+            } else {
+                None
+            }
         }
         None => None,
     };
@@ -542,6 +537,7 @@ pub(crate) fn make_collector_for_split(
     split_id: String,
     doc_mapper: &dyn DocMapper,
     search_request: &SearchRequest,
+    aggregation_limits: AggregationLimits,
 ) -> crate::Result<QuickwitCollector> {
     let aggregation = match &search_request.aggregation_request {
         Some(aggregation) => Some(serde_json::from_str(aggregation)?),
@@ -578,7 +574,22 @@ pub(crate) fn make_collector_for_split(
         sort_by,
         timestamp_filter_builder_opt,
         aggregation,
+        aggregation_limits,
     })
+}
+
+pub fn aggregation_limits_from_searcher_context(
+    searcher_context: &Arc<SearcherContext>,
+) -> AggregationLimits {
+    AggregationLimits::new(
+        Some(
+            searcher_context
+                .searcher_config
+                .aggregation_memory_limit
+                .get_bytes(),
+        ),
+        Some(searcher_context.searcher_config.aggregation_bucket_limit),
+    )
 }
 
 /// Builds a QuickwitCollector that's only useful for merging fruits.
@@ -587,6 +598,7 @@ pub(crate) fn make_collector_for_split(
 /// can be set to default.
 pub(crate) fn make_merge_collector(
     search_request: &SearchRequest,
+    searcher_context: &Arc<SearcherContext>,
 ) -> crate::Result<QuickwitCollector> {
     let aggregation = match &search_request.aggregation_request {
         Some(aggregation) => Some(serde_json::from_str(aggregation)?),
@@ -599,6 +611,7 @@ pub(crate) fn make_merge_collector(
         sort_by: SortBy::DocId,
         timestamp_filter_builder_opt: None,
         aggregation,
+        aggregation_limits: aggregation_limits_from_searcher_context(searcher_context),
     })
 }
 

@@ -21,6 +21,7 @@ use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
+use bytes::Bytes;
 use chitchat::transport::ChannelTransport;
 use quickwit_actors::{Mailbox, Universe};
 use quickwit_cluster::create_cluster_for_test;
@@ -31,7 +32,7 @@ use quickwit_config::{
     SourceParams, VecSourceParams,
 };
 use quickwit_doc_mapper::DocMapper;
-use quickwit_ingest_api::{init_ingest_api, QUEUES_DIR_NAME};
+use quickwit_ingest::{init_ingest_api, QUEUES_DIR_NAME};
 use quickwit_metastore::file_backed_metastore::FileBackedMetastoreFactory;
 use quickwit_metastore::{Metastore, MetastoreUriResolver, Split, SplitMetadata, SplitState};
 use quickwit_storage::{Storage, StorageUriResolver};
@@ -136,14 +137,14 @@ impl TestSandbox {
     ///
     /// The documents are expected to be `JsonValue`.
     /// They can be created using the `serde_json::json!` macro.
-    pub async fn add_documents<I>(&self, split_docs: I) -> anyhow::Result<IndexingStatistics>
+    pub async fn add_documents<I>(&self, json_docs: I) -> anyhow::Result<IndexingStatistics>
     where
         I: IntoIterator<Item = JsonValue> + 'static,
         I::IntoIter: Send,
     {
-        let docs: Vec<String> = split_docs
+        let docs: Vec<Bytes> = json_docs
             .into_iter()
-            .map(|doc_json| doc_json.to_string())
+            .map(|json_doc| Bytes::from(json_doc.to_string()))
             .collect();
         let add_docs_id = self.add_docs_id.fetch_add(1, Ordering::SeqCst);
         let source_config = SourceConfig {

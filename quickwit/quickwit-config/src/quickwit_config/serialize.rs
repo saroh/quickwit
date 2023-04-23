@@ -132,7 +132,7 @@ pub async fn load_quickwit_config_with_env(
 #[serde(tag = "version")]
 enum VersionedQuickwitConfig {
     #[serde(rename = "0.5")]
-    // Retro compatibilty with 0.4.
+    // Retro compatibility with 0.4.
     #[serde(alias = "0.4")]
     V0_5(QuickwitConfigBuilder),
 }
@@ -145,6 +145,7 @@ impl From<VersionedQuickwitConfig> for QuickwitConfigBuilder {
     }
 }
 
+#[serde_with::serde_as]
 #[derive(Debug, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct QuickwitConfigBuilder {
@@ -168,6 +169,9 @@ struct QuickwitConfigBuilder {
     data_dir_uri: ConfigValue<Uri, QW_DATA_DIR>,
     metastore_uri: ConfigValue<Uri, QW_METASTORE_URI>,
     default_index_root_uri: ConfigValue<Uri, QW_DEFAULT_INDEX_ROOT_URI>,
+    #[serde(default)]
+    #[serde_as(deserialize_as = "serde_with::OneOrMany<_>")]
+    rest_cors_allow_origins: Vec<String>,
     #[serde(rename = "indexer")]
     #[serde(default)]
     indexer_config: IndexerConfig,
@@ -257,6 +261,7 @@ impl QuickwitConfigBuilder {
             data_dir_path,
             metastore_uri,
             default_index_root_uri,
+            rest_cors_allow_origins: self.rest_cors_allow_origins,
             indexer_config: self.indexer_config,
             searcher_config: self.searcher_config,
             ingest_api_config: self.ingest_api_config,
@@ -299,6 +304,7 @@ impl Default for QuickwitConfigBuilder {
             data_dir_uri: default_data_dir_uri(),
             metastore_uri: ConfigValue::none(),
             default_index_root_uri: ConfigValue::none(),
+            rest_cors_allow_origins: Vec::new(),
             indexer_config: IndexerConfig::default(),
             searcher_config: SearcherConfig::default(),
             ingest_api_config: IngestApiConfig::default(),
@@ -350,6 +356,7 @@ pub fn quickwit_config_for_test() -> QuickwitConfig {
         data_dir_path,
         metastore_uri,
         default_index_root_uri,
+        rest_cors_allow_origins: Vec::new(),
         indexer_config: IndexerConfig::default(),
         searcher_config: SearcherConfig::default(),
         ingest_api_config: IngestApiConfig::default(),
@@ -437,6 +444,8 @@ mod tests {
         assert_eq!(
             config.searcher_config,
             SearcherConfig {
+                aggregation_memory_limit: Byte::from_str("1G").unwrap(),
+                aggregation_bucket_limit: 500_000,
                 fast_field_cache_capacity: Byte::from_str("10G").unwrap(),
                 split_footer_cache_capacity: Byte::from_str("1G").unwrap(),
                 max_num_concurrent_split_searches: 150,
@@ -471,7 +480,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_quickwit_config_parse_yaml() {
-        test_quickwit_config_parse_aux(ConfigFormat::Toml)
+        test_quickwit_config_parse_aux(ConfigFormat::Yaml)
             .await
             .unwrap();
     }
@@ -488,7 +497,7 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{parsing_error:?}")
-            .contains("unknown field `max_num_concurrent_split_searchs_with_typo`"));
+            .contains("unknown field `max_num_concurrent_split_searches_with_typo`"));
     }
 
     #[tokio::test]
@@ -906,5 +915,122 @@ mod tests {
         assert!(error
             .to_string()
             .contains("max_trace_duration_secs: invalid value: integer `0`"))
+    }
+
+    #[tokio::test]
+    async fn test_rest_config_accepts_wildcard() {
+        let rest_config_yaml = r#"
+            version: 0.5
+            rest_cors_allow_origins: '*'
+        "#;
+        let config = load_quickwit_config_with_env(
+            ConfigFormat::Yaml,
+            rest_config_yaml.as_bytes(),
+            &Default::default(),
+        )
+        .await
+        .expect("Deserialize rest config");
+        assert_eq!(config.rest_cors_allow_origins, ["*"]);
+    }
+
+    #[tokio::test]
+    async fn test_rest_config_accepts_single_origin() {
+        let rest_config_yaml = r#"
+            version: 0.5
+            rest_cors_allow_origins: https://www.my-domain.com
+        "#;
+        let config = load_quickwit_config_with_env(
+            ConfigFormat::Yaml,
+            rest_config_yaml.as_bytes(),
+            &Default::default(),
+        )
+        .await
+        .expect("Deserialize rest config");
+        assert_eq!(
+            config.rest_cors_allow_origins,
+            ["https://www.my-domain.com"]
+        );
+
+        let rest_config_yaml = r#"
+            version: 0.5
+            rest_cors_allow_origins: http://192.168.0.108:7280
+        "#;
+        let config = load_quickwit_config_with_env(
+            ConfigFormat::Yaml,
+            rest_config_yaml.as_bytes(),
+            &Default::default(),
+        )
+        .await
+        .expect("Deserialize rest config");
+        assert_eq!(
+            config.rest_cors_allow_origins,
+            ["http://192.168.0.108:7280"]
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rest_config_accepts_multi_origin() {
+        let rest_config_yaml = r#"
+            version: 0.5
+            rest_cors_allow_origins: 
+                - https://www.my-domain.com
+        "#;
+        let config = load_quickwit_config_with_env(
+            ConfigFormat::Yaml,
+            rest_config_yaml.as_bytes(),
+            &Default::default(),
+        )
+        .await
+        .expect("Deserialize rest config");
+        assert_eq!(
+            config.rest_cors_allow_origins,
+            ["https://www.my-domain.com"]
+        );
+
+        let rest_config_yaml = r#"
+            version: 0.5
+            rest_cors_allow_origins: 
+                - https://www.my-domain.com
+                - https://www.my-other-domain.com
+        "#;
+        let config = load_quickwit_config_with_env(
+            ConfigFormat::Yaml,
+            rest_config_yaml.as_bytes(),
+            &Default::default(),
+        )
+        .await
+        .expect("Deserialize rest config");
+        assert_eq!(
+            config.rest_cors_allow_origins,
+            [
+                "https://www.my-domain.com",
+                "https://www.my-other-domain.com"
+            ]
+        );
+
+        let rest_config_yaml = r#"
+            version: 0.5
+            rest_cors_allow_origins: 
+        "#;
+        load_quickwit_config_with_env(
+            ConfigFormat::Yaml,
+            rest_config_yaml.as_bytes(),
+            &Default::default(),
+        )
+        .await
+        .expect_err("Config should not allow empty origins.");
+
+        let rest_config_yaml = r#"
+            version: 0.5
+            rest_cors_allow_origins: 
+                -
+        "#;
+        load_quickwit_config_with_env(
+            ConfigFormat::Yaml,
+            rest_config_yaml.as_bytes(),
+            &Default::default(),
+        )
+        .await
+        .expect_err("Config should not allow empty origins.");
     }
 }

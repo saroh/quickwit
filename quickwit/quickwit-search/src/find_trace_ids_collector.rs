@@ -20,27 +20,27 @@
 use std::cmp::{Ord, Ordering};
 use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
 
 use fnv::{FnvHashMap, FnvHashSet};
 use itertools::Itertools;
-use quickwit_opentelemetry::otlp::B64TraceId;
+use quickwit_opentelemetry::otlp::TraceId;
 use serde::{Deserialize, Serialize};
 use tantivy::collector::{Collector, SegmentCollector};
-use tantivy::fastfield::{Column, MultiValuedFastFieldReader};
-use tantivy::{DateTime, DocId, InvertedIndexReader, Score, SegmentReader};
+use tantivy::columnar::StrColumn;
+use tantivy::fastfield::Column;
+use tantivy::{DateTime, DocId, Score, SegmentReader};
 
 type TermOrd = u64;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Span {
-    pub trace_id: B64TraceId,
+    pub trace_id: TraceId,
     #[serde(with = "serde_datetime")]
     pub span_timestamp: DateTime,
 }
 
 impl Span {
-    fn new(trace_id: B64TraceId, span_timestamp: DateTime) -> Self {
+    fn new(trace_id: TraceId, span_timestamp: DateTime) -> Self {
         Self {
             trace_id,
             span_timestamp,
@@ -137,7 +137,7 @@ impl FindTraceIdsCollector {
         ])
     }
 
-    /// The field names of the term dictionnaries accessed by this collector.
+    /// The field names of the term dictionaries accessed by this collector.
     pub fn term_dict_field_names(&self) -> HashSet<String> {
         HashSet::from_iter([self.trace_id_field_name.clone()])
     }
@@ -152,20 +152,22 @@ impl Collector for FindTraceIdsCollector {
         _segment_local_id: u32,
         segment_reader: &SegmentReader,
     ) -> tantivy::Result<Self::Child> {
-        let trace_id_ff_reader = segment_reader
+        let trace_id_column = segment_reader
             .fast_fields()
-            .u64s(&self.trace_id_field_name)?;
-        let span_timestamp_column = segment_reader
+            .str(&self.trace_id_field_name)?
+            .ok_or_else(|| {
+                let err_msg = format!(
+                    "Failed to find column for trace_id field `{}`",
+                    self.trace_id_field_name
+                );
+                tantivy::TantivyError::InternalError(err_msg)
+            })?;
+        let span_timestamp_column: Column<DateTime> = segment_reader
             .fast_fields()
             .date(&self.span_timestamp_field_name)?;
-        let trace_id_field = segment_reader
-            .schema()
-            .get_field(&self.trace_id_field_name)?;
-        let inverted_index_reader = segment_reader.inverted_index(trace_id_field)?;
-        Ok(Self::Child {
-            trace_id_ff_reader,
+        Ok(FindTraceIdsSegmentCollector {
+            trace_id_column,
             span_timestamp_column,
-            inverted_index_reader,
             select_trace_ids: SelectTraceIds::new(self.num_traces),
         })
     }
@@ -191,7 +193,7 @@ fn merge_segment_fruits(mut segment_fruits: Vec<Vec<Span>>, num_traces: usize) -
 
     for trace_id in segment_fruits.into_iter().kmerge() {
         if !seen_trace_ids.contains(&trace_id.trace_id) {
-            seen_trace_ids.insert(trace_id.trace_id.clone());
+            seen_trace_ids.insert(trace_id.trace_id);
             trace_ids.push(trace_id);
 
             if trace_ids.len() == num_traces {
@@ -203,21 +205,21 @@ fn merge_segment_fruits(mut segment_fruits: Vec<Vec<Span>>, num_traces: usize) -
 }
 
 pub struct FindTraceIdsSegmentCollector {
-    trace_id_ff_reader: MultiValuedFastFieldReader<u64>,
-    span_timestamp_column: Arc<dyn Column<DateTime>>,
-    inverted_index_reader: Arc<InvertedIndexReader>,
+    trace_id_column: StrColumn,
+    span_timestamp_column: Column<DateTime>,
     select_trace_ids: SelectTraceIds,
 }
 
 impl FindTraceIdsSegmentCollector {
     fn trace_id_term_ord(&self, doc: DocId) -> TermOrd {
-        self.trace_id_ff_reader
-            .get_first_val(doc)
-            .expect("There should be exactly one trace ID per span.")
+        self.trace_id_column
+            .term_ords(doc)
+            .next()
+            .unwrap_or_default()
     }
 
     fn span_timestamp(&self, doc: DocId) -> DateTime {
-        self.span_timestamp_column.get_val(doc)
+        self.span_timestamp_column.first(doc).unwrap_or_default()
     }
 }
 
@@ -231,25 +233,20 @@ impl SegmentCollector for FindTraceIdsSegmentCollector {
     }
 
     fn harvest(self) -> Self::Fruit {
-        let mut buffer = Vec::with_capacity(24);
-
+        let mut buffer = String::with_capacity(TraceId::BASE64_LENGTH);
         self.select_trace_ids
             .harvest()
             .into_iter()
-            .map(|trace_id| {
-                let span_timestamp = trace_id.span_timestamp;
-
+            .map(|trace_id_term_ord| {
+                let span_timestamp = trace_id_term_ord.span_timestamp;
                 let found_term = self
-                    .inverted_index_reader
-                    .terms()
-                    .ord_to_term(trace_id.term_ord, &mut buffer)
-                    .expect("The term ord should exist in the term dict.");
-
+                    .trace_id_column
+                    .ord_to_str(trace_id_term_ord.term_ord, &mut buffer)
+                    .expect("Failed to lookup trace ID in the column term dictionary");
                 debug_assert!(found_term);
-                debug_assert_eq!(buffer.len(), 24);
-
+                debug_assert_eq!(buffer.len(), TraceId::BASE64_LENGTH);
                 let trace_id = buffer[..]
-                    .try_into()
+                    .parse()
                     .expect("The term dict should store Base64 trace IDs.");
                 Span::new(trace_id, span_timestamp)
             })
@@ -376,11 +373,10 @@ mod tests {
 
     impl Span {
         fn for_test(bytes: &[u8], span_timestamp_micros: i64) -> Self {
-            let mut trace_id = [0u8; 24];
+            let mut trace_id = [0u8; 16];
             trace_id[..bytes.len()].copy_from_slice(bytes);
-            let b64trace_id = B64TraceId::new(trace_id);
             let span_timestamp = DateTime::from_timestamp_micros(span_timestamp_micros);
-            Self::new(b64trace_id, span_timestamp)
+            Self::new(TraceId::new(trace_id), span_timestamp)
         }
     }
 
@@ -519,7 +515,7 @@ mod tests {
     #[test]
     fn test_merge_segment_fruits() {
         {
-            let segment_fruits = vec![];
+            let segment_fruits = Vec::new();
             let merged_fruit = merge_segment_fruits(segment_fruits, 0);
             assert_eq!(merged_fruit, &[]);
         }

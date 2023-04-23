@@ -39,6 +39,8 @@ doc_mapping:
     - name: severity_text
       type: text
       tokenizer: raw
+      fast: 
+        - tokenizer: lowercase
     - name: body
       type: text
       tokenizer: default
@@ -69,17 +71,13 @@ The index ID is a string that uniquely identifies the index within the metastore
 The index-uri defines where the index files (also called splits) should be stored.
 This parameter expects a [storage uri](../reference/storage-uri).
 
-
 The `index-uri` parameter is optional.
 By default, the `index-uri` will be computed by concatenating the `index-id` with the
 `default_index_root_uri` defined in the [Quickwit's config](node-config).
 
-
 :::caution
-The file storage will not work when running quickwit in distributed mode.
-Today, only the s3 storage is available when running several searcher nodes.
+The file storage will not work when running quickwit in distributed mode. Instead, AWS S3, Azure Blob Storage, Google Cloud Storage (in s3 interoperability mode) or other S3-compatible storage systems including Scaleway Object Storage and Garage should be used as storage when running several searcher nodes.
 :::
-
 
 ## Doc mapping
 
@@ -99,7 +97,7 @@ The doc mapping defines how a document and the fields it contains are stored and
 ### Field types
 
 Each field has a type that indicates the kind of data it contains, such as integer on 64 bits or text.
-Quickwit supports the following raw types `text`, `i64`, `u64`, `f64`, `datetime`, `bool`, and `bytes`, and also supports composite types such as array and object. Behind the scenes, Quickwit is using tantivy field types, don't hesitate to look at [tantivy documentation](https://github.com/tantivy-search/tantivy) if you want to go into the details.
+Quickwit supports the following raw types [`text`](#text-type), [`i64`](#numeric-types-i64-u64-and-f64-type), [`u64`](#numeric-types-i64-u64-and-f64-type), [`f64`](#numeric-types-i64-u64-and-f64-type), [`datetime`](#datetime-type), [`bool`](#bool-type), [`ip`](#ip-type), and [`bytes`](#bytes-type), and also supports composite types such as array and object. Behind the scenes, Quickwit is using tantivy field types, don't hesitate to look at [tantivy documentation](https://github.com/tantivy-search/tantivy) if you want to go into the details.
 
 ### Raw types
 
@@ -125,10 +123,10 @@ fieldnorms: true
 | ------------- | ------------- | ------------- |
 | `description` | Optional description for the field. | `None` |
 | `stored`    | Whether value is stored in the document store | `true` |
-| `tokenizer` | Name of the `Tokenizer`, choices between `raw`, `default`, `en_stem` and `chinese_compatible` | `default` |
+| `tokenizer` | Name of the `Tokenizer`. ([See tokenizers](#description-of-available-tokenizers)) for a list of available tokenizers.  | `default` |
 | `record`    | Describes the amount of information indexed, choices between `basic`, `freq` and `position` | `basic` |
 | `fieldnorms` | Whether to store fieldnorms for the field. Fieldnorms are required to calculate the BM25 Score of the document. | `false` |
-| `fast`     | Whether value is stored in a fast field. The fast field will contain the term ids. The effective cardinality depends on the tokenizer. When creating fast fields on text fields it is recommended to use the "raw" tokenizer, since it will store the original text unchanged. The "default" tokenizer will store the terms as lower case and this will be reflected in the dictionary ([see tokenizers](#description-of-available-tokenizers)). | `false` |
+| `fast`     | Whether value is stored in a fast field. The fast field will contain the term ids and the dictionary. The effective cardinality depends on the tokenizer. The default behaviour for `true` is to store the original text unchanged. The tokenizer on the fast field is seperately configured. It can be configured via `{"tokenizer": "lowercase"}`. ([See tokenizers](#description-of-available-tokenizers)) for a list of available tokenizers. | `false` |
 
 #### **Description of available tokenizers**
 
@@ -138,6 +136,7 @@ fieldnorms: true
 | `default`     | Chops the text on according to whitespace and punctuation, removes tokens that are too long, and converts to lowercase |
 | `en_stem`     |  Like `default`, but also applies stemming on the resulting tokens  |
 | `chinese_compatible` |  Chop between each CJK character in addition to what `default` does. Should be used with `record: position` to be able to properly search |
+| `lowercase` |  Applies a lowercase transformation on the text. It does not tokenize the text. |
 
 **Description of record options**
 
@@ -456,7 +455,7 @@ For field names containing the `.` character, you will need to escape it when re
 
 ### Behavior with null values or missing fields
 
-Fields with `null` or missing fields in your JSON document will be silently ignored when indexing with the exception of non-text fast fields. Non-text fast fields are required and entire record will be rejected with an error if at least one fast field is missing. 
+Fields with `null` or missing fields in your JSON document will be silently ignored when indexing.
 
 ## Indexing settings
 

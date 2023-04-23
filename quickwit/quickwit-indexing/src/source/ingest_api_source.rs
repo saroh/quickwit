@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use quickwit_actors::{ActorContext, ActorExitStatus, Mailbox};
-use quickwit_ingest_api::{
+use quickwit_ingest::{
     get_ingest_api_service, CreateQueueIfNotExistsRequest, DocCommand, FetchRequest, FetchResponse,
     GetPartitionId, IngestApiService, SuggestTruncateRequest,
 };
@@ -128,9 +128,8 @@ impl Source for IngestApiSource {
         let FetchResponse {
             first_position: first_position_opt,
             doc_batch: doc_batch_opt,
-        } = self
-            .ingest_api_service
-            .ask_for_res(fetch_req)
+        } = ctx
+            .ask_for_res(&self.ingest_api_service, fetch_req)
             .await
             .map_err(anyhow::Error::from)?;
 
@@ -145,12 +144,10 @@ impl Source for IngestApiSource {
         };
 
         // TODO use a timestamp (in the raw doc batch) given by at ingest time to be more accurate.
-        let mut raw_doc_batch = RawDocBatch::default();
+        let mut raw_doc_batch = RawDocBatch::with_capacity(doc_batch.num_docs());
         for doc in doc_batch.iter() {
             match doc {
-                DocCommand::Ingest { payload } => raw_doc_batch
-                    .docs
-                    .push(String::from_utf8_lossy(payload.as_ref()).to_string()),
+                DocCommand::Ingest { payload } => raw_doc_batch.docs.push(payload),
                 DocCommand::Commit => raw_doc_batch.force_commit = true,
             }
         }
@@ -176,7 +173,7 @@ impl Source for IngestApiSource {
     async fn suggest_truncate(
         &self,
         checkpoint: SourceCheckpoint,
-        _ctx: &ActorContext<SourceActor>,
+        ctx: &ActorContext<SourceActor>,
     ) -> anyhow::Result<()> {
         if let Some(Position::Offset(offset_str)) =
             checkpoint.position_for_partition(&self.partition_id)
@@ -186,8 +183,7 @@ impl Source for IngestApiSource {
                 index_id: self.ctx.index_id.clone(),
                 up_to_position_included,
             };
-            self.ingest_api_service
-                .ask_for_res(suggest_truncate_req)
+            ctx.ask_for_res(&self.ingest_api_service, suggest_truncate_req)
                 .await
                 .map_err(anyhow::Error::from)?;
         }
@@ -227,7 +223,7 @@ mod tests {
     use quickwit_actors::Universe;
     use quickwit_common::rand::append_random_suffix;
     use quickwit_config::{IngestApiConfig, SourceConfig, SourceParams, INGEST_API_SOURCE_ID};
-    use quickwit_ingest_api::{init_ingest_api, CommitType, DocBatchBuilder, IngestRequest};
+    use quickwit_ingest::{init_ingest_api, CommitType, DocBatchBuilder, IngestRequest};
     use quickwit_metastore::checkpoint::{SourceCheckpoint, SourceCheckpointDelta};
     use quickwit_metastore::metastore_for_test;
 
@@ -240,7 +236,7 @@ mod tests {
         batch_size: usize,
         commit_type: CommitType,
     ) -> IngestRequest {
-        let mut doc_batches = vec![];
+        let mut doc_batches = Vec::new();
         let mut doc_id = 0usize;
         for _ in 0..num_batch {
             let mut doc_batch_builder = DocBatchBuilder::new(index_id.clone());
@@ -316,7 +312,7 @@ mod tests {
         );
         let doc_batches: Vec<RawDocBatch> = doc_processor_inbox.drain_for_test_typed();
         assert_eq!(doc_batches.len(), 2);
-        assert!(doc_batches[1].docs[0].starts_with("037736"));
+        assert!(&doc_batches[1].docs[0].starts_with(b"037736"));
         // TODO: Source deadlocks and test hangs occasionally if we don't quit source first.
         ingest_api_source_handle.quit().await;
         universe.assert_quit().await;
@@ -414,7 +410,7 @@ mod tests {
         );
         let doc_batches: Vec<RawDocBatch> = doc_processor_inbox.drain_for_test_typed();
         assert_eq!(doc_batches.len(), 1);
-        assert!(doc_batches[0].docs[0].starts_with("001201"));
+        assert!(&doc_batches[0].docs[0].starts_with(b"001201"));
         assert_eq!(doc_batches[0].checkpoint_delta.num_partitions(), 1);
         assert_eq!(
             doc_batches[0].checkpoint_delta.partitions().next().unwrap(),
@@ -473,7 +469,7 @@ mod tests {
         );
         let doc_batches: Vec<RawDocBatch> = doc_processor_inbox.drain_for_test_typed();
         assert_eq!(doc_batches.len(), 1);
-        assert!(doc_batches[0].docs[0].starts_with("000000"));
+        assert!(&doc_batches[0].docs[0].starts_with(b"000000"));
         // TODO: Source deadlocks and test hangs occasionally if we don't quit source first.
         ingest_api_source_handle.quit().await;
         universe.assert_quit().await;
@@ -526,7 +522,7 @@ mod tests {
         );
         let doc_batches: Vec<RawDocBatch> = doc_processor_inbox.drain_for_test_typed();
         assert_eq!(doc_batches.len(), 2);
-        assert!(doc_batches[1].docs[0].starts_with("037736"));
+        assert!(doc_batches[1].docs[0].starts_with(b"037736"));
         assert!(doc_batches[0].force_commit);
         assert!(doc_batches[1].force_commit);
         ingest_api_service
@@ -591,7 +587,7 @@ mod tests {
         );
         let doc_batches: Vec<RawDocBatch> = doc_processor_inbox.drain_for_test_typed();
         assert_eq!(doc_batches.len(), 2);
-        assert!(doc_batches[1].docs[0].starts_with("037736"));
+        assert!(doc_batches[1].docs[0].starts_with(b"037736"));
         assert!(!doc_batches[0].force_commit);
         assert!(!doc_batches[1].force_commit);
         ingest_api_service

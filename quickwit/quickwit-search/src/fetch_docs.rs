@@ -21,7 +21,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::{Context, Ok};
-use futures::stream::{StreamExt, TryStreamExt};
+use futures::{StreamExt, TryStreamExt};
 use itertools::Itertools;
 use quickwit_doc_mapper::DocMapper;
 use quickwit_proto::{FetchDocsResponse, PartialHit, SearchRequest, SplitIdAndFooterOffsets};
@@ -148,6 +148,7 @@ pub async fn fetch_docs(
     Ok(FetchDocsResponse { hits })
 }
 
+// number of concurrent fetch allowed for a single split.
 const NUM_CONCURRENT_REQUESTS: usize = 10;
 
 /// A struct for holding a fetched document's content and snippet.
@@ -190,7 +191,7 @@ async fn fetch_docs_in_split(
         let moved_searcher = searcher.clone();
         let moved_doc_mapper = doc_mapper.clone();
         let fields_snippet_generator_opt_clone = fields_snippet_generator_opt.clone();
-        async move {
+        tokio::spawn(async move {
             let doc = moved_searcher
                 .doc_async(global_doc_addr.doc_addr)
                 .await
@@ -237,11 +238,14 @@ async fn fetch_docs_in_split(
                     snippet_json: Some(snippet_json),
                 },
             ))
-        }
+        })
     });
 
-    let stream = futures::stream::iter(doc_futures).buffer_unordered(NUM_CONCURRENT_REQUESTS);
-    stream.try_collect::<Vec<_>>().await
+    futures::stream::iter(doc_futures)
+        .buffer_unordered(NUM_CONCURRENT_REQUESTS)
+        .map(|res| res?)
+        .try_collect::<Vec<_>>()
+        .await
 }
 
 // A struct to hold the snippet generators associated to

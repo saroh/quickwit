@@ -18,15 +18,12 @@
 // along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 use std::collections::{HashMap, HashSet};
-use std::io;
 use std::ops::Bound;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::Context;
 use futures::future::try_join_all;
-use futures::Future;
 use itertools::{Either, Itertools};
 use quickwit_directories::{CachingDirectory, HotDirectory, StorageDirectory};
 use quickwit_doc_mapper::{DocMapper, WarmupInfo, QUICKWIT_TOKENIZER_MANAGER};
@@ -37,17 +34,21 @@ use quickwit_proto::{
 use quickwit_storage::{
     wrap_storage_with_long_term_cache, BundleStorage, MemorySizedCache, OwnedBytes, Storage,
 };
+use tantivy::aggregation::AggregationLimits;
 use tantivy::collector::Collector;
 use tantivy::directory::FileSlice;
-use tantivy::schema::{Cardinality, Field, FieldType};
+use tantivy::fastfield::FastFieldReaders;
+use tantivy::schema::{Field, FieldType};
 use tantivy::{Index, ReloadPolicy, Searcher, Term};
-use tokio::task::spawn_blocking;
 use tracing::*;
 
-use crate::collector::{make_collector_for_split, make_merge_collector};
+use crate::collector::{
+    aggregation_limits_from_searcher_context, make_collector_for_split, make_merge_collector,
+};
 use crate::service::SearcherContext;
 use crate::SearchError;
 
+#[instrument(skip(index_storage, footer_cache))]
 async fn get_split_footer_from_cache_or_fetch(
     index_storage: Arc<dyn Storage>,
     split_and_footer_offsets: &SplitIdAndFooterOffsets,
@@ -87,6 +88,7 @@ async fn get_split_footer_from_cache_or_fetch(
 /// - A split footer cache given by `SearcherContext.split_footer_cache`.
 /// - A fast fields cache given by `SearcherContext.storage_long_term_cache`.
 /// - An ephemeral unbounded cache directory whose lifetime is tied to the returned `Index`.
+#[instrument(skip(searcher_context, index_storage))]
 pub(crate) async fn open_index_with_caches(
     searcher_context: &Arc<SearcherContext>,
     index_storage: Arc<dyn Storage>,
@@ -181,7 +183,10 @@ async fn warm_up_term_dict_fields(
             .schema()
             .get_field(term_dict_field_name)
             .with_context(|| {
-                format!("Couldn't get field named {term_dict_field_name:?} from schema.")
+                format!(
+                    "Couldn't get field named `{term_dict_field_name}` from schema to warm up \
+                     term dicts."
+                )
             })?;
 
         term_dict_fields.push(term_dict_field);
@@ -207,10 +212,9 @@ async fn warm_up_postings(
 ) -> anyhow::Result<()> {
     let mut fields = Vec::new();
     for field_name in field_names.iter() {
-        let field = searcher
-            .schema()
-            .get_field(field_name)
-            .with_context(|| format!("Couldn't get field named {field_name:?} from schema."))?;
+        let field = searcher.schema().get_field(field_name).with_context(|| {
+            format!("Couldn't get field named `{field_name}` from schema to warm up postings.")
+        })?;
 
         fields.push(field);
     }
@@ -226,85 +230,37 @@ async fn warm_up_postings(
     Ok(())
 }
 
-// The field cardinality is not the same as the fast field cardinality.
-//
-// E.g. a single valued bytes field has a multivalued fast field cardinality.
-fn get_fastfield_cardinality(field_type: &FieldType) -> Option<Cardinality> {
-    match field_type {
-        FieldType::U64(options)
-        | FieldType::I64(options)
-        | FieldType::F64(options)
-        | FieldType::Bool(options) => options.get_fastfield_cardinality(),
-        FieldType::Date(options) => options.get_fastfield_cardinality(),
-        FieldType::Facet(_) => Some(Cardinality::MultiValues),
-        FieldType::Bytes(options) => {
-            if options.is_fast() {
-                Some(Cardinality::MultiValues)
-            } else {
-                None
-            }
-        }
-        FieldType::Str(options) => {
-            if options.is_fast() {
-                Some(Cardinality::MultiValues)
-            } else {
-                None
-            }
-        }
-        FieldType::IpAddr(options) => options.get_fastfield_cardinality(),
-        FieldType::JsonObject(_options) => None,
-    }
+async fn warm_up_fastfield(
+    fast_field_reader: &FastFieldReaders,
+    fast_field_name: &str,
+) -> anyhow::Result<()> {
+    let columns = fast_field_reader
+        .list_dynamic_column_handles(fast_field_name)
+        .await?;
+    futures::future::try_join_all(
+        columns
+            .into_iter()
+            .map(|col| async move { col.file_slice().read_bytes_async().await }),
+    )
+    .await?;
+    Ok(())
 }
 
-fn fast_field_idxs(fast_field_cardinality: Cardinality) -> &'static [usize] {
-    match fast_field_cardinality {
-        Cardinality::SingleValue => &[0],
-        Cardinality::MultiValues => &[0, 1],
-    }
-}
-
+/// Populates the short-lived cache with the data for
+/// all of the fast fields passed as argument.
 async fn warm_up_fastfields(
     searcher: &Searcher,
     fast_field_names: &HashSet<String>,
 ) -> anyhow::Result<()> {
-    let mut fast_fields = Vec::new();
-    for fast_field_name in fast_field_names.iter() {
-        let fast_field = searcher
-            .schema()
-            .get_field(fast_field_name)
-            .with_context(|| {
-                format!("Couldn't get field named {fast_field_name:?} from schema.")
-            })?;
-
-        let field_entry = searcher.schema().get_field_entry(fast_field);
-        if !field_entry.is_fast() {
-            anyhow::bail!("Field {:?} is not a fast field.", fast_field_name);
-        }
-        let cardinality =
-            get_fastfield_cardinality(field_entry.field_type()).with_context(|| {
-                format!(
-                    "Couldn't get field cardinality {fast_field_name:?} from type {field_entry:?}."
-                )
-            })?;
-
-        fast_fields.push((fast_field, cardinality));
-    }
-
-    type SendableFuture = dyn Future<Output = io::Result<OwnedBytes>> + Send;
-    let mut warm_up_futures: Vec<Pin<Box<SendableFuture>>> = Vec::new();
-    for (field, cardinality) in fast_fields {
-        for segment_reader in searcher.segment_readers() {
-            for &fast_field_idx in fast_field_idxs(cardinality) {
-                let fast_field_slice = segment_reader
-                    .fast_fields()
-                    .fast_field_data(field, fast_field_idx)?;
-                warm_up_futures.push(Box::pin(async move {
-                    fast_field_slice.read_bytes_async().await
-                }));
-            }
+    let mut warm_up_futures = Vec::new();
+    for segment_reader in searcher.segment_readers() {
+        let fast_field_reader = segment_reader.fast_fields();
+        for fast_field_name in fast_field_names {
+            let warm_up_fut = warm_up_fastfield(fast_field_reader, fast_field_name);
+            warm_up_futures.push(Box::pin(warm_up_fut));
         }
     }
-    try_join_all(warm_up_futures).await?;
+    futures::future::try_join_all(warm_up_futures).await?;
     Ok(())
 }
 
@@ -346,19 +302,31 @@ async fn warm_up_fieldnorms(searcher: &Searcher, requires_scoring: bool) -> anyh
 }
 
 /// Apply a leaf search on a single split.
-#[instrument(skip(searcher_context, search_request, storage, split, doc_mapper))]
+#[instrument(skip(
+    searcher_context,
+    search_request,
+    storage,
+    split,
+    doc_mapper,
+    agg_limits
+))]
 async fn leaf_search_single_split(
     searcher_context: &Arc<SearcherContext>,
     search_request: &SearchRequest,
     storage: Arc<dyn Storage>,
     split: SplitIdAndFooterOffsets,
     doc_mapper: Arc<dyn DocMapper>,
+    agg_limits: AggregationLimits,
 ) -> crate::Result<LeafSearchResponse> {
     let split_id = split.split_id.to_string();
     let index = open_index_with_caches(searcher_context, storage, &split, true).await?;
     let split_schema = index.schema();
-    let quickwit_collector =
-        make_collector_for_split(split_id.clone(), doc_mapper.as_ref(), search_request)?;
+    let quickwit_collector = make_collector_for_split(
+        split_id.clone(),
+        doc_mapper.as_ref(),
+        search_request,
+        agg_limits,
+    )?;
     let (query, mut warmup_info) = doc_mapper.query(split_schema, search_request)?;
     let reader = index
         .reader_builder()
@@ -395,13 +363,19 @@ pub async fn leaf_search(
     splits: &[SplitIdAndFooterOffsets],
     doc_mapper: Arc<dyn DocMapper>,
 ) -> Result<LeafSearchResponse, SearchError> {
+    let agg_limits = aggregation_limits_from_searcher_context(&searcher_context);
+    let request = Arc::new(request.clone());
     let leaf_search_single_split_futures: Vec<_> = splits
         .iter()
         .map(|split| {
+            let split = split.clone();
+            let agg_limits = agg_limits.clone();
             let doc_mapper_clone = doc_mapper.clone();
             let index_storage_clone = index_storage.clone();
             let searcher_context_clone = searcher_context.clone();
-            async move {
+            let request = request.clone();
+            tokio::spawn(
+                async move {
                 let _leaf_split_search_permit = searcher_context_clone.leaf_search_split_semaphore
                     .acquire()
                     .await
@@ -412,15 +386,16 @@ pub async fn leaf_search(
                     .start_timer();
                 let leaf_search_single_split_res = leaf_search_single_split(
                     &searcher_context_clone,
-                    request,
+                    &request,
                     index_storage_clone,
                     split.clone(),
                     doc_mapper_clone,
+                    agg_limits,
                 )
                 .await;
                 timer.observe_duration();
                 leaf_search_single_split_res.map_err(|err| (split.split_id.clone(), err))
-            }
+            }.in_current_span())
         })
         .collect();
     let split_search_results = futures::future::join_all(leaf_search_single_split_futures).await;
@@ -433,25 +408,31 @@ pub async fn leaf_search(
     ) = split_search_results
         .into_iter()
         .partition_map(|split_search_res| match split_search_res {
-            Ok(split_search_resp) => Either::Left(Ok(split_search_resp)),
-            Err(err) => Either::Right(err),
+            Ok(Ok(split_search_resp)) => Either::Left(Ok(split_search_resp)),
+            Ok(Err(err)) => Either::Right(err),
+            Err(e) => {
+                warn!("A leaf_search_single_split panicked");
+                Either::Right(("unknown".to_string(), e.into()))
+            }
         });
 
     // Creates a collector which merges responses into one
-    let merge_collector = make_merge_collector(request)?;
+    let merge_collector = make_merge_collector(&request, &searcher_context)?;
 
     // Merging is a cpu-bound task.
     // It should be executed by Tokio's blocking threads.
-    let mut merged_search_response =
-        spawn_blocking(move || merge_collector.merge_fruits(split_search_responses))
-            .instrument(info_span!("merge_search_responses"))
-            .await
-            .context("Failed to merge split search responses.")??;
+    let span = info_span!("merge_search_responses");
+    let mut merged_search_response = crate::run_cpu_intensive(move || {
+        let _span_guard = span.enter();
+        merge_collector.merge_fruits(split_search_responses)
+    })
+    .await
+    .context("Failed to merge split search responses.")??;
 
     merged_search_response
         .failed_splits
-        .extend(errors.iter().map(|(split_id, err)| SplitSearchError {
-            split_id: split_id.to_string(),
+        .extend(errors.into_iter().map(|(split_id, err)| SplitSearchError {
+            split_id,
             error: format!("{err}"),
             retryable_error: true,
         }));
@@ -478,7 +459,7 @@ async fn leaf_list_terms_single_split(
         .get_field(&search_request.field)
         .with_context(|| {
             format!(
-                "Couldn't get field named {:?} from schema.",
+                "Couldn't get field named {:?} from schema to list terms.",
                 search_request.field
             )
         })?;
