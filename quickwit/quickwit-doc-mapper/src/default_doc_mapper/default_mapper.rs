@@ -194,9 +194,6 @@ impl TryFrom<DefaultDocMapperBuilder> for DefaultDocMapper {
 
         let schema = schema_builder.build();
 
-        // validate fast fields
-        validate_tag_fields(&builder.tag_fields, &schema)?;
-
         // Resolve default search fields
         let mut default_search_field_names = Vec::new();
         for field_name in &builder.default_search_fields {
@@ -209,21 +206,24 @@ impl TryFrom<DefaultDocMapperBuilder> for DefaultDocMapper {
             default_search_field_names.push(field_name.clone());
         }
 
+        let partition_key = RoutingExpr::new(builder.partition_key.as_deref().unwrap_or(""))
+            .context("Failed to interpret the partition key.")?;
+
+        // validate fast fields
+        validate_tag_fields(&builder.tag_fields, &schema)?;
         // Resolve tag fields
         let mut tag_field_names: BTreeSet<String> = Default::default();
         for tag_field_name in &builder.tag_fields {
-            if tag_field_names.contains(tag_field_name) {
-                bail!("Duplicated tag field: `{}`", tag_field_name)
+            validate_tag_and_insert(tag_field_name, &mut tag_field_names, &schema)?;
+        }
+        // partition key fields should be considered as tags
+        for partition_key_field in &partition_key.field_names() {
+            if !tag_field_names.contains(partition_key_field) {
+                validate_tag_and_insert(partition_key_field, &mut tag_field_names, &schema)?;
             }
-            schema
-                .get_field(tag_field_name)
-                .with_context(|| format!("Unknown tag field: `{tag_field_name}`"))?;
-            tag_field_names.insert(tag_field_name.clone());
         }
 
         let required_fields = Vec::new();
-        let partition_key = RoutingExpr::new(builder.partition_key.as_deref().unwrap_or(""))
-            .context("Failed to interpret the partition key.")?;
         Ok(DefaultDocMapper {
             schema,
             source_field,
@@ -238,6 +238,21 @@ impl TryFrom<DefaultDocMapperBuilder> for DefaultDocMapper {
             mode,
         })
     }
+}
+
+fn validate_tag_and_insert(
+    tag_field_name: &String,
+    tag_field_names: &mut BTreeSet<String>,
+    schema: &Schema,
+) -> Result<(), anyhow::Error> {
+    if tag_field_names.contains(tag_field_name) {
+        bail!("Duplicated tag field: `{}`", tag_field_name)
+    }
+    schema
+        .get_field(tag_field_name)
+        .with_context(|| format!("Unknown tag field: `{tag_field_name}`"))?;
+    tag_field_names.insert(tag_field_name.clone());
+    Ok(())
 }
 
 impl From<DefaultDocMapper> for DefaultDocMapperBuilder {
